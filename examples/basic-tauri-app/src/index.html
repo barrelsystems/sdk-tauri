@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Barrel SDK — Tauri Example</title>
+    <link rel="stylesheet" href="index.css" />
+  </head>
+  <body>
+    <main>
+      <svg class="logomark" viewBox="0 0 16 16" aria-label="Barrel">
+        <rect x="4" y="1" width="8" height="2" />
+        <rect x="4" y="4" width="8" height="3" />
+        <rect x="4" y="8" width="8" height="3" />
+        <rect x="4" y="12" width="8" height="3" />
+      </svg>
+      <h1>Barrel SDK Example</h1>
+      <p class="subtitle">Packaged with Tauri</p>
+      <section>
+        <h2>Policy</h2>
+        <p id="policy">Waiting for first check-in…</p>
+      </section>
+      <section>
+        <h2>Last update error</h2>
+        <p id="error">None this session</p>
+      </section>
+      <button id="download-update" type="button">Download update</button>
+      <button id="apply-update" type="button">Apply update</button>
+    </main>
+    <script type="module" src="main.js"></script>
+  </body>
+</html>

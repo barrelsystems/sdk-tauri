@@ -1,0 +1,33 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Barrel Tauri Example",
+  "version": "1.0.0",
+  "identifier": "codes.barrel.examples.basic-tauri-app",
+  "build": {
+    "frontendDist": "../src"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "Barrel Tauri Example",
+        "width": 480,
+        "height": 600
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all"
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": ["http://localhost:1/latest.json"],
+      "dangerousInsecureTransportProtocol": true,
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU1QkQ2Qzc0NEY1OENEMzMKUldRenpWaFBkR3k5NVFpbFVZQ3VnM3ovUVFweStVTDJxdjBXcy92MUpRRXJHYy9Ycjg1NEl2c0sK"
+    }
+  }
+}
