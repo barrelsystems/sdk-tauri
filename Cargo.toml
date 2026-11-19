@@ -1,0 +1,37 @@
+[package]
+name = "tauri-plugin-barrel-kit"
+version = "0.0.1"
+edition = "2021"
+description = "Barrel's release-intelligence SDK for Tauri apps."
+license = "MIT"
+repository = "https://github.com/barrelsystems/sdk-tauri"
+
+[lib]
+name = "tauri_plugin_barrel_kit"
+path = "src/lib.rs"
+
+[dependencies]
+tauri = { version = "2" }
+tauri-plugin-updater = { version = "2" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
+# Policy-signature verification -- Rust's std has no Ed25519 of its own.
+ed25519-dalek = { version = "2", features = ["pkcs8"] }
+# Parses the embedded/rotated PEM keys ed25519-dalek's own API doesn't decode.
+pkcs8 = { version = "0.10", features = ["pem", "alloc"] }
+# Decodes the base64-encoded signature fields the wire protocol carries.
+base64 = "0.22"
+# Generates the random installation ID; std has no UUID generator.
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "time", "sync", "macros", "test-util"] }
+tempfile = "3"
+
+[profile.release]
+# This SDK ships inside other people's apps -- a smaller binary is a cost
+# to them, not us.
+opt-level = "s"
+lto = true
