@@ -81,6 +81,10 @@ jobs:
           ref: dist
           path: sdk-conformance-harness
 
+      - name: Install the conformance harness's runtime dependencies
+        working-directory: sdk-conformance-harness
+        run: npm install --omit=dev
+
       - name: Run conformance
         run: |
           set -euo pipefail

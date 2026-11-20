@@ -13,7 +13,7 @@ use std::time::Duration;
 /// What the mock update endpoint and binary endpoint return for the
 /// adapter's one automatic check at startup -- configured before the
 /// Tauri app is built, since there's no public hook to re-trigger a check.
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum MockResponse {
     /// 204 No Content.
@@ -60,7 +60,7 @@ pub enum MockResponse {
     },
 }
 
-#[derive(Clone, Copy, Debug, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CorruptSignature {
     /// Not valid base64 -- `Error::Base64`.

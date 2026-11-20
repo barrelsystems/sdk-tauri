@@ -70,8 +70,11 @@ async fn create_adapter(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| r#"{"kind":"noUpdate"}"#.to_string());
 
-    let mock_response: serde_json::Value = match serde_json::from_str(&variant_json) {
-        Ok(value) => value,
+    // Deserialize straight into the strict, validated type -- never hold
+    // onto the untyped `Value` this parses through, so nothing downstream
+    // can see a field this type doesn't itself constrain.
+    let mock_response: MockResponse = match serde_json::from_str(&variant_json) {
+        Ok(mock_response) => mock_response,
         Err(error) => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -80,13 +83,6 @@ async fn create_adapter(
                 .into_response()
         }
     };
-    if let Err(error) = serde_json::from_value::<MockResponse>(mock_response.clone()) {
-        return (
-            StatusCode::BAD_REQUEST,
-            format!("invalid variant JSON: {error}"),
-        )
-            .into_response();
-    }
 
     // The check-in `baseUrl`/`publicKeyPem` every adapter now always
     // carries are passed through here unchanged, regardless of `variant`.
