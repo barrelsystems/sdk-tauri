@@ -32,6 +32,15 @@ mod tests {
         (signing_key, pem)
     }
 
+    fn keypair_other() -> (SigningKey, String) {
+        let signing_key = SigningKey::from_bytes(&[7; 32]);
+        let pem = signing_key
+            .verifying_key()
+            .to_public_key_pem(pkcs8::LineEnding::LF)
+            .unwrap();
+        (signing_key, pem)
+    }
+
     fn response_signed_by(signing_key: &SigningKey, policy_json: &str) -> CheckInResponse {
         let signature = STANDARD.encode(signing_key.sign(policy_json.as_bytes()).to_bytes());
         CheckInResponse {
@@ -92,14 +101,5 @@ mod tests {
         let response = response_signed_by(&signing_key, "not json");
 
         assert_eq!(verify_and_parse_policy(&response, &pem), None);
-    }
-
-    fn keypair_other() -> (SigningKey, String) {
-        let signing_key = SigningKey::from_bytes(&[7; 32]);
-        let pem = signing_key
-            .verifying_key()
-            .to_public_key_pem(pkcs8::LineEnding::LF)
-            .unwrap();
-        (signing_key, pem)
     }
 }

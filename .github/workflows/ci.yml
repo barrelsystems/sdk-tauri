@@ -37,7 +37,7 @@ jobs:
         run: cargo fmt --check
 
       - name: Lint
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --features test-service -- -D warnings
 
       - name: Test
         run: cargo test
@@ -48,3 +48,50 @@ jobs:
       - name: Build example app
         working-directory: examples/basic-tauri-app/src-tauri
         run: cargo build
+
+  conformance:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build test-service
+        run: cargo build --features test-service --bin test-service
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Checkout the conformance harness's built dist branch
+        uses: actions/checkout@v7
+        with:
+          repository: barrelsystems/sdk-conformance-harness
+          ref: dist
+          path: sdk-conformance-harness
+
+      - name: Install the conformance harness's runtime dependencies
+        working-directory: sdk-conformance-harness
+        run: npm install --omit=dev
+
+      - name: Run conformance
+        run: |
+          set -euo pipefail
+          ./target/debug/test-service > /tmp/test-service.log 2>&1 &
+          for _ in $(seq 1 50); do
+            port=$(grep -o 'http://127.0.0.1:[0-9]*' /tmp/test-service.log | tail -1 | grep -o '[0-9]*$' || true)
+            [ -n "$port" ] && break
+            sleep 0.2
+          done
+          node sdk-conformance-harness/dist/cli.js conformance "http://127.0.0.1:$port" --junit conformance.xml

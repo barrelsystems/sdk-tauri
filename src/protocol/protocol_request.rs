@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use crate::types::{CheckInResponse, PROTOCOL_VERSION};
 
-pub(crate) struct RequestEnvelopeParams<'a> {
+pub(crate) struct PostProtocolRequestParams<'a> {
     pub base_url: &'a str,
     pub path: &'a str,
     pub credential: &'a str,
@@ -16,9 +16,9 @@ pub(crate) struct RequestEnvelopeParams<'a> {
 ///
 /// Shared by `check_in` and `pre_action_check` -- both return the identical
 /// `{protocolVersion, policy, signature}` envelope shape.
-pub(crate) async fn post_and_validate_envelope(
+pub(crate) async fn post_protocol_request(
     client: &reqwest::Client,
-    params: RequestEnvelopeParams<'_>,
+    params: PostProtocolRequestParams<'_>,
     body: &impl serde::Serialize,
     log: &(impl Fn(&str) + ?Sized),
 ) -> Option<CheckInResponse> {
@@ -78,7 +78,7 @@ mod tests {
 
     /// Starts a tiny raw-TCP server that accepts exactly one connection,
     /// drains the request, writes back `raw_response` verbatim, then
-    /// exits -- enough to drive `post_and_validate_envelope` through a
+    /// exits -- enough to drive `post_protocol_request` through a
     /// real HTTP round trip without a mocking dependency.
     async fn serve_once(raw_response: &'static str) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -109,9 +109,9 @@ mod tests {
         let raw = http_ok(&body);
         let base_url = serve_once(Box::leak(raw.into_boxed_str())).await;
 
-        let result = post_and_validate_envelope(
+        let result = post_protocol_request(
             &reqwest::Client::new(),
-            RequestEnvelopeParams {
+            PostProtocolRequestParams {
                 base_url: &base_url,
                 path: "/check-in",
                 credential: "cred",
@@ -133,9 +133,9 @@ mod tests {
             "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
         let base_url = serve_once(raw).await;
 
-        let result = post_and_validate_envelope(
+        let result = post_protocol_request(
             &reqwest::Client::new(),
-            RequestEnvelopeParams {
+            PostProtocolRequestParams {
                 base_url: &base_url,
                 path: "/check-in",
                 credential: "cred",
@@ -156,9 +156,9 @@ mod tests {
         let raw = http_ok(&body);
         let base_url = serve_once(Box::leak(raw.into_boxed_str())).await;
 
-        let result = post_and_validate_envelope(
+        let result = post_protocol_request(
             &reqwest::Client::new(),
-            RequestEnvelopeParams {
+            PostProtocolRequestParams {
                 base_url: &base_url,
                 path: "/check-in",
                 credential: "cred",
@@ -181,9 +181,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         drop(listener);
 
-        let result = post_and_validate_envelope(
+        let result = post_protocol_request(
             &reqwest::Client::new(),
-            RequestEnvelopeParams {
+            PostProtocolRequestParams {
                 base_url: &format!("http://{addr}"),
                 path: "/check-in",
                 credential: "cred",

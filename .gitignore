@@ -2,4 +2,5 @@
 **/target
 /Cargo.lock
 /examples/*/src-tauri/gen
+/gen
 .DS_Store

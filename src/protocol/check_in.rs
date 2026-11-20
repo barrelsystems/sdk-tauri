@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 use uuid::Uuid;
 
-use super::request::{post_and_validate_envelope, RequestEnvelopeParams};
+use super::protocol_request::{post_protocol_request, PostProtocolRequestParams};
 use crate::attributes::bound_attributes;
 use crate::persistence::buffered_facts::BufferedFact;
 use crate::types::{
@@ -11,17 +11,30 @@ use crate::types::{
 
 const CHECK_IN_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Parameters for one `send_check_in` call.
+#[derive(Debug)]
 pub struct CheckInParams<'a> {
+    /// The check-in endpoint's base URL.
     pub base_url: &'a str,
+    /// Sent as a bearer token.
     pub credential: &'a str,
+    /// Stable per-install identifier.
     pub installation_id: &'a str,
+    /// This SDK's own version.
     pub sdk_version: &'a str,
+    /// The app version this installation is currently running.
     pub observed_version: &'a str,
+    /// The host OS platform name.
     pub platform: &'a str,
+    /// The host CPU architecture.
     pub arch: &'a str,
+    /// The host OS version.
     pub os_version: &'a str,
+    /// Arbitrary key-value pairs sent with this check-in.
     pub attributes: &'a HashMap<String, String>,
+    /// The adapter's current lifecycle state, as reported in this check-in.
     pub adapter_state: AdapterState,
+    /// Facts buffered since the last successful check-in.
     pub buffered_facts: Vec<BufferedFact>,
 }
 
@@ -52,9 +65,9 @@ pub async fn send_check_in(
             .collect(),
     };
 
-    let parsed = post_and_validate_envelope(
+    let parsed = post_protocol_request(
         client,
-        RequestEnvelopeParams {
+        PostProtocolRequestParams {
             base_url: params.base_url,
             path: "/check-in",
             credential: params.credential,
@@ -105,9 +118,11 @@ pub fn now_epoch_millis() -> i64 {
 }
 
 /// Inverse of `now_iso8601`'s formatter -- parses the same fixed
-/// "YYYY-MM-DDTHH:MM:SS.mmmZ" shape this SDK always produces (and the
-/// only shape a trusted Policy response's `issuedAt`/`until` ever takes)
-/// back into milliseconds since the Unix epoch.
+/// "YYYY-MM-DDTHH:MM:SS.mmmZ" shape this SDK always produces back into
+/// milliseconds since the Unix epoch.
+///
+/// That fixed shape is also the only one a trusted Policy response's
+/// `issuedAt`/`until` ever takes.
 pub fn parse_iso8601_to_epoch_millis(s: &str) -> Option<i64> {
     if s.len() != 24 {
         return None;

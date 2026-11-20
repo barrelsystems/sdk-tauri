@@ -122,6 +122,9 @@ impl BufferedFact {
 pub struct BufferedFactsStore {
     buffer: Mutex<Vec<BufferedFact>>,
     disk: DiskStore,
+    // Bound once via `configure()` and never changed afterward -- every
+    // other method reads this instead of taking its own `path` argument.
+    path: std::sync::OnceLock<PathBuf>,
 }
 
 impl BufferedFactsStore {
@@ -129,12 +132,15 @@ impl BufferedFactsStore {
         Self {
             buffer: Mutex::new(Vec::new()),
             disk: DiskStore::new(),
+            path: std::sync::OnceLock::new(),
         }
     }
 
-    /// Hydrates the in-memory buffer from disk. Call once at startup,
-    /// before any fact is recorded.
+    /// Binds this store's on-disk path and hydrates the in-memory buffer
+    /// from it. Call once at startup, before any fact is recorded.
     pub async fn configure(&self, path: &PathBuf) {
+        let _ = self.path.set(path.clone());
+
         let Ok(raw) = tokio::fs::read_to_string(path).await else {
             return;
         };
@@ -152,43 +158,64 @@ impl BufferedFactsStore {
 
     /// Clears exactly the facts in `sent` (a snapshot `snapshot()` returned
     /// earlier) -- call only once ingestion ACKs the check-in that carried
-    /// them, never optimistically: a fact recorded after `sent` was taken
-    /// must survive.
-    pub async fn clear(&self, path: &PathBuf, sent: &[BufferedFact]) {
+    /// them, never optimistically.
+    ///
+    /// A fact recorded after `sent` was taken must survive this call.
+    pub async fn clear(&self, sent: &[BufferedFact]) {
         let mut buffer = self.buffer.lock().await;
         buffer.retain(|fact| !sent.contains(fact));
-        self.persist_locked(path, &buffer).await;
+        self.persist_locked(&buffer).await;
     }
 
-    pub async fn record_adapter_state(&self, path: &PathBuf, state: AdapterState) {
+    pub async fn record_adapter_state(&self, state: AdapterState) {
         let now = now_iso8601();
-        self.upsert(
-            path,
-            BufferedFact::AdapterState {
-                state,
-                first_observed_at: now.clone(),
-                last_observed_at: now,
-                occurrence_count: 1,
-            },
-        )
+        self.upsert(BufferedFact::AdapterState {
+            state,
+            first_observed_at: now.clone(),
+            last_observed_at: now,
+            occurrence_count: 1,
+        })
         .await;
     }
 
-    pub async fn record_update_error(&self, path: &PathBuf, failure: UpdateFailure) {
+    pub async fn record_update_error(&self, failure: UpdateFailure) {
         let now = now_iso8601();
-        self.upsert(
-            path,
-            BufferedFact::UpdateError {
-                failure,
-                first_observed_at: now.clone(),
-                last_observed_at: now,
-                occurrence_count: 1,
-            },
-        )
+        self.upsert(BufferedFact::UpdateError {
+            failure,
+            first_observed_at: now.clone(),
+            last_observed_at: now,
+            occurrence_count: 1,
+        })
         .await;
     }
 
-    async fn upsert(&self, path: &PathBuf, candidate: BufferedFact) {
+    /// `getLastUpdateError()`'s fallback source on a fresh process: the
+    /// most recently observed buffered `updateError` fact, picked by
+    /// `last_observed_at`.
+    ///
+    /// A full `UpdateError` already carries its own `title`, resolved at
+    /// the time it was recorded, so no further lookup is needed here.
+    ///
+    /// `None` if nothing's buffered, or if the buffer happens to be locked
+    /// by a concurrent async write at this exact synchronous-call instant
+    /// -- fail-open, same posture as every other read here.
+    pub fn latest_update_error(&self) -> Option<UpdateFailure> {
+        let buffer = self.buffer.try_lock().ok()?;
+        buffer
+            .iter()
+            .filter_map(|fact| match fact {
+                BufferedFact::UpdateError {
+                    failure,
+                    last_observed_at,
+                    ..
+                } => Some((last_observed_at.as_str(), failure)),
+                BufferedFact::AdapterState { .. } => None,
+            })
+            .max_by_key(|(last_observed_at, _)| *last_observed_at)
+            .map(|(_, failure)| failure.clone())
+    }
+
+    async fn upsert(&self, candidate: BufferedFact) {
         let mut buffer = self.buffer.lock().await;
         let discriminant = candidate.discriminant();
 
@@ -198,7 +225,7 @@ impl BufferedFactsStore {
         {
             let merged = candidate.with_merge(&buffer[existing_index]);
             buffer[existing_index] = merged;
-            self.persist_locked(path, &buffer).await;
+            self.persist_locked(&buffer).await;
             return;
         }
 
@@ -215,10 +242,11 @@ impl BufferedFactsStore {
         }
 
         buffer.push(candidate);
-        self.persist_locked(path, &buffer).await;
+        self.persist_locked(&buffer).await;
     }
 
-    async fn persist_locked(&self, path: &PathBuf, buffer: &[BufferedFact]) {
+    async fn persist_locked(&self, buffer: &[BufferedFact]) {
+        let Some(path) = self.path.get() else { return };
         let snapshot = serde_json::to_string(&FactsOnDisk {
             facts: buffer.to_vec(),
         })
@@ -227,10 +255,13 @@ impl BufferedFactsStore {
     }
 
     /// The reserved synchronous path for process exit (`RunEvent::Exit`),
-    /// which can't `.await`. Best-effort: if the buffer is locked by an
-    /// in-flight async write at this exact instant, this silently skips --
-    /// fail-open, same posture as every other persistence path here.
-    pub fn flush_sync(&self, path: &PathBuf) {
+    /// which can't `.await`.
+    ///
+    /// Best-effort: if the buffer is locked by an in-flight async write at
+    /// this exact instant, this silently skips -- fail-open, same posture
+    /// as every other persistence path here.
+    pub fn flush_sync(&self) {
+        let Some(path) = self.path.get() else { return };
         let Ok(buffer) = self.buffer.try_lock() else {
             return;
         };
@@ -266,6 +297,9 @@ fn find_eviction_candidate_index(buffer: &[BufferedFact]) -> Option<usize> {
         .map(|(index, _)| index)
 }
 
+// A thin forward, not a duplicate -- `check_in` already imports
+// `BufferedFact` from here, so importing its `now_iso8601` back would
+// make the two modules depend on each other both ways.
 fn now_iso8601() -> String {
     crate::protocol::check_in::now_iso8601()
 }
@@ -284,13 +318,24 @@ mod tests {
         }
     }
 
+    fn update_error(platform_code: &str) -> UpdateFailure {
+        UpdateFailure {
+            phase: crate::types::Phase::Download,
+            failure_mode: UpdateFailureMode::Unknown,
+            title: "x".to_string(),
+            platform: "tauri-updater".to_string(),
+            platform_code: platform_code.to_string(),
+        }
+    }
+
     #[tokio::test]
     async fn merges_a_repeated_fact_instead_of_duplicating_it() {
         let store = BufferedFactsStore::new();
         let path = NamedTempFile::new().unwrap().path().to_path_buf();
+        store.configure(&path).await;
 
-        store.record_adapter_state(&path, AdapterState::Idle).await;
-        store.record_adapter_state(&path, AdapterState::Idle).await;
+        store.record_adapter_state(AdapterState::Idle).await;
+        store.record_adapter_state(AdapterState::Idle).await;
 
         let snapshot = store.snapshot().await;
         assert_eq!(snapshot.len(), 1);
@@ -301,14 +346,13 @@ mod tests {
     async fn clear_only_removes_facts_present_in_the_sent_snapshot() {
         let store = BufferedFactsStore::new();
         let path = NamedTempFile::new().unwrap().path().to_path_buf();
+        store.configure(&path).await;
 
-        store
-            .record_adapter_state(&path, AdapterState::Checking)
-            .await;
+        store.record_adapter_state(AdapterState::Checking).await;
         let sent = store.snapshot().await;
-        store.record_adapter_state(&path, failed_state()).await; // recorded mid-flight
+        store.record_adapter_state(failed_state()).await; // recorded mid-flight
 
-        store.clear(&path, &sent).await;
+        store.clear(&sent).await;
 
         let remaining = store.snapshot().await;
         assert_eq!(remaining.len(), 1);
@@ -325,26 +369,35 @@ mod tests {
     async fn a_full_buffer_of_terminal_facts_drops_an_incoming_intermediate_one() {
         let store = BufferedFactsStore::new();
         let path = NamedTempFile::new().unwrap().path().to_path_buf();
+        store.configure(&path).await;
 
         for i in 0..32 {
             store
-                .record_update_error(
-                    &path,
-                    UpdateFailure {
-                        phase: crate::types::Phase::Download,
-                        failure_mode: UpdateFailureMode::Unknown,
-                        title: "x".to_string(),
-                        platform: "tauri-updater".to_string(),
-                        platform_code: format!("code-{i}"),
-                    },
-                )
+                .record_update_error(update_error(&format!("code-{i}")))
                 .await;
         }
         assert_eq!(store.snapshot().await.len(), 32);
 
-        store
-            .record_adapter_state(&path, AdapterState::Checking)
-            .await;
+        store.record_adapter_state(AdapterState::Checking).await;
         assert_eq!(store.snapshot().await.len(), 32); // dropped, not evicted-in
+    }
+
+    #[tokio::test]
+    async fn latest_update_error_picks_the_most_recently_observed_one() {
+        let store = BufferedFactsStore::new();
+        let path = NamedTempFile::new().unwrap().path().to_path_buf();
+        store.configure(&path).await;
+
+        store.record_update_error(update_error("first")).await;
+        store.record_update_error(update_error("second")).await;
+
+        let latest = store.latest_update_error().expect("a fact was buffered");
+        assert_eq!(latest.platform_code, "second");
+    }
+
+    #[tokio::test]
+    async fn latest_update_error_is_none_when_nothing_is_buffered() {
+        let store = BufferedFactsStore::new();
+        assert!(store.latest_update_error().is_none());
     }
 }

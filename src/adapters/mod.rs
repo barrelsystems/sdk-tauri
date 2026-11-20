@@ -1,6 +1,5 @@
 pub mod error_map;
 
-use std::path::PathBuf;
 use std::sync::Mutex as SyncMutex;
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_updater::{Update, UpdaterExt};
@@ -26,6 +25,7 @@ pub struct Adapter {
 }
 
 impl Adapter {
+    /// Starts idle, with no feed-URL override and nothing downloaded yet.
     pub fn new() -> Self {
         let (state_tx, _) = tokio::sync::watch::channel(AdapterState::Idle);
         Self {
@@ -51,23 +51,20 @@ impl Adapter {
         *self.feed_url.lock().unwrap() = Some(url);
     }
 
+    /// The adapter's current lifecycle state, read synchronously.
     pub fn state(&self) -> AdapterState {
         self.state.lock().unwrap().clone()
     }
 
+    /// The most recent failure this session, or `None` if nothing's failed yet.
     pub fn last_error(&self) -> Option<UpdateFailure> {
         self.last_error.lock().unwrap().clone()
     }
 
-    async fn set_state(
-        &self,
-        facts: &BufferedFactsStore,
-        facts_path: &PathBuf,
-        state: AdapterState,
-    ) {
+    async fn set_state(&self, facts: &BufferedFactsStore, state: AdapterState) {
         *self.state.lock().unwrap() = state.clone();
         let _ = self.state_tx.send(state.clone());
-        facts.record_adapter_state(facts_path, state).await;
+        facts.record_adapter_state(state).await;
     }
 
     fn fail(&self, new_state: AdapterState, failure: UpdateFailure) {
@@ -82,10 +79,8 @@ impl Adapter {
         &self,
         app: &AppHandle<R>,
         facts: &BufferedFactsStore,
-        facts_path: &PathBuf,
     ) {
-        self.set_state(facts, facts_path, AdapterState::Checking)
-            .await;
+        self.set_state(facts, AdapterState::Checking).await;
 
         let built = match self.feed_url.lock().unwrap().clone() {
             Some(url) => url
@@ -102,22 +97,22 @@ impl Adapter {
         let updater = match built {
             Ok(updater) => updater,
             Err(message) => {
-                self.record_updater_error(facts, facts_path, &message).await;
+                self.record_updater_error(facts, &message).await;
                 return;
             }
         };
 
         match updater.check().await {
-            Ok(None) => self.set_state(facts, facts_path, AdapterState::Idle).await,
+            Ok(None) => self.set_state(facts, AdapterState::Idle).await,
             Ok(Some(update)) => {
                 let release_notes = update.body.clone();
                 *self.pending_update.lock().await = Some(update);
-                self.set_state(facts, facts_path, AdapterState::Available { release_notes })
+                self.set_state(facts, AdapterState::Available { release_notes })
                     .await;
             }
             Err(error) => {
                 let (failure_mode, phase, platform_code) = map_updater_error(&error);
-                self.record_failure(facts, facts_path, failure_mode, phase, platform_code)
+                self.record_failure(facts, failure_mode, phase, platform_code)
                     .await;
             }
         }
@@ -125,16 +120,12 @@ impl Adapter {
 
     /// Downloads the update `check_for_updates` found. A no-op if nothing
     /// is pending (already downloaded, or no update was ever available).
-    pub async fn download_update(&self, facts: &BufferedFactsStore, facts_path: &PathBuf) {
+    pub async fn download_update(&self, facts: &BufferedFactsStore) {
         let mut pending = self.pending_update.lock().await;
         let Some(update) = pending.take() else { return };
 
-        self.set_state(
-            facts,
-            facts_path,
-            AdapterState::Downloading { progress: None },
-        )
-        .await;
+        self.set_state(facts, AdapterState::Downloading { progress: None })
+            .await;
 
         let state_for_progress = &self.state;
         let state_tx_for_progress = &self.state_tx;
@@ -160,50 +151,61 @@ impl Adapter {
             Ok(bytes) => {
                 *self.downloaded_bytes.lock().await = Some(bytes);
                 *pending = Some(update);
-                self.set_state(facts, facts_path, AdapterState::Downloaded)
-                    .await;
+                self.set_state(facts, AdapterState::Downloaded).await;
             }
             Err(error) => {
                 let (failure_mode, phase, platform_code) = map_updater_error(&error);
-                self.record_failure(facts, facts_path, failure_mode, phase, platform_code)
+                self.record_failure(facts, failure_mode, phase, platform_code)
                     .await;
             }
         }
     }
 
-    /// Installs the already-downloaded update. On Windows this exits the
-    /// process; on macOS/Linux the host must relaunch afterward.
-    pub async fn quit_and_install(&self) {
+    /// Installs the already-downloaded update. On Windows a successful
+    /// install exits the process; on macOS/Linux the host must relaunch
+    /// afterward.
+    ///
+    /// On a failed install, transitions to `Failed` instead of leaving the
+    /// adapter stuck at `Downloaded`.
+    pub async fn quit_and_install(&self, facts: &BufferedFactsStore) {
         let update = self.pending_update.lock().await.take();
         let bytes = self.downloaded_bytes.lock().await.take();
-        if let (Some(update), Some(bytes)) = (update, bytes) {
-            let _ = update.install(bytes);
-        } else {
+
+        let (Some(update), Some(bytes)) = (update, bytes) else {
             // Install attempted before a successful download -- full-wrap
             // means this can only happen from a bug in Barrel's own
-            // sequencing, never a real host/library interaction, so it's a
-            // defect tally, not an `UpdateFailure`.
+            // sequencing, never a real host/library interaction.
+
+            // So it's a defect tally, not an `UpdateFailure`.
             crate::internal_defects::record_internal_defect("adapter:install-before-download");
+            return;
+        };
+
+        self.handle_install_result(facts, update.install(bytes))
+            .await;
+    }
+
+    /// The `install()` error-handling half of `quit_and_install`, split out
+    /// so it can be driven by a directly-constructed `Err` in tests without
+    /// needing a real downloaded `Update` to force failure through.
+    async fn handle_install_result(
+        &self,
+        facts: &BufferedFactsStore,
+        result: Result<(), tauri_plugin_updater::Error>,
+    ) {
+        if let Err(error) = result {
+            let (failure_mode, phase, platform_code) = map_updater_error(&error);
+            self.record_failure(facts, failure_mode, phase, platform_code)
+                .await;
         }
     }
 
     /// Always `Phase::Unknown`/`UpdateFailureMode::Unknown` -- only fires when
     /// *building* the updater itself fails, never a real
     /// `tauri_plugin_updater::Error` the mapping table classifies.
-    async fn record_updater_error(
-        &self,
-        facts: &BufferedFactsStore,
-        facts_path: &PathBuf,
-        message: &str,
-    ) {
-        self.record_failure(
-            facts,
-            facts_path,
-            UpdateFailureMode::Unknown,
-            Phase::Unknown,
-            message,
-        )
-        .await;
+    async fn record_updater_error(&self, facts: &BufferedFactsStore, message: &str) {
+        self.record_failure(facts, UpdateFailureMode::Unknown, Phase::Unknown, message)
+            .await;
     }
 
     /// Classifies, tallies, and buffers one failure -- shared by every
@@ -211,15 +213,14 @@ impl Adapter {
     async fn record_failure(
         &self,
         facts: &BufferedFactsStore,
-        facts_path: &PathBuf,
         failure_mode: UpdateFailureMode,
         phase: Phase,
         platform_code: &str,
     ) {
         let (failure, state) = build_failure_state(PLATFORM, failure_mode, phase, platform_code);
         self.fail(state.clone(), failure.clone());
-        facts.record_update_error(facts_path, failure).await;
-        facts.record_adapter_state(facts_path, state).await;
+        facts.record_update_error(failure).await;
+        facts.record_adapter_state(state).await;
     }
 }
 
@@ -270,7 +271,8 @@ mod tests {
             .unwrap_or(0);
 
         let adapter = Adapter::new();
-        adapter.quit_and_install().await; // nothing pending -- out-of-sequence call
+        let facts = BufferedFactsStore::new();
+        adapter.quit_and_install(&facts).await; // nothing pending -- out-of-sequence call
 
         let after = crate::internal_defects::get_internal_defect_counts()
             .get("adapter:install-before-download")
@@ -280,16 +282,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failed_install_transitions_to_failed_instead_of_staying_stuck_at_downloaded() {
+        let adapter = Adapter::new();
+        let facts = BufferedFactsStore::new();
+        adapter.fail(
+            AdapterState::Downloaded,
+            build_failure_state(PLATFORM, UpdateFailureMode::Unknown, Phase::Unknown, "x").0,
+        );
+        assert_eq!(adapter.state(), AdapterState::Downloaded);
+
+        adapter
+            .handle_install_result(
+                &facts,
+                Err(tauri_plugin_updater::Error::InvalidUpdaterFormat),
+            )
+            .await;
+
+        assert!(matches!(adapter.state(), AdapterState::Failed { .. }));
+        let error = adapter.last_error().expect("a failure was recorded");
+        assert_eq!(error.failure_mode, UpdateFailureMode::ExtractionFailed);
+        assert_eq!(error.phase, Phase::Extract);
+    }
+
+    #[tokio::test]
     async fn available_state_carries_release_notes_through_to_subscribers() {
         let adapter = Adapter::new();
         let mut rx = adapter.subscribe_state();
         let facts = BufferedFactsStore::new();
-        let facts_path = std::path::PathBuf::from("/tmp/barrel-test-release-notes.json");
 
         adapter
             .set_state(
                 &facts,
-                &facts_path,
                 AdapterState::Available {
                     release_notes: Some("Fixed a thing.".to_string()),
                 },

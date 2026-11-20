@@ -1,7 +1,6 @@
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::adapter::Adapter;
+use crate::adapters::Adapter;
 use crate::persistence::buffered_facts::BufferedFactsStore;
 use crate::protocol::pre_action_check::{check_pre_action, PreActionCheckParams, Stage};
 use crate::types::{AdapterState, Policy};
@@ -61,11 +60,10 @@ impl HostControl {
         ctx: &ActionContext<'_>,
         adapter: &Adapter,
         facts: &BufferedFactsStore,
-        facts_path: &PathBuf,
         auto_download: bool,
     ) {
         if auto_download {
-            self.download_update(ctx, adapter, facts, facts_path).await;
+            self.download_update(ctx, adapter, facts).await;
         }
     }
 
@@ -77,14 +75,13 @@ impl HostControl {
         ctx: &ActionContext<'_>,
         adapter: &Adapter,
         facts: &BufferedFactsStore,
-        facts_path: &PathBuf,
     ) {
         if !matches!(adapter.state(), AdapterState::Available { .. }) {
             return;
         }
 
         if can_proceed(ctx, Stage::PreDownload).await {
-            adapter.download_update(facts, facts_path).await;
+            adapter.download_update(facts).await;
             if adapter.state() == AdapterState::Downloaded {
                 self.pending_install.store(true, Ordering::SeqCst);
             }
@@ -94,13 +91,28 @@ impl HostControl {
     /// Host-triggered earlier apply, ahead of the natural-quit default. A
     /// no-op, not an error, before anything has actually downloaded --
     /// there's nothing yet to apply.
-    pub async fn apply_update(&self, ctx: &ActionContext<'_>, adapter: &Adapter) {
+    pub async fn apply_update(
+        &self,
+        ctx: &ActionContext<'_>,
+        adapter: &Adapter,
+        facts: &BufferedFactsStore,
+    ) {
         if adapter.state() != AdapterState::Downloaded {
             return;
         }
 
         if can_proceed(ctx, Stage::PreApply).await {
-            adapter.quit_and_install().await;
+            adapter.quit_and_install(facts).await;
+
+            // A failed install leaves the adapter in `Failed`, not stuck
+            // at `Downloaded`.
+
+            // Clearing the flag here is what stops `RunEvent::ExitRequested`
+            // from retrying the same failing install forever on every
+            // subsequent exit attempt.
+            if matches!(adapter.state(), AdapterState::Failed { .. }) {
+                self.pending_install.store(false, Ordering::SeqCst);
+            }
         }
     }
 }
@@ -135,10 +147,9 @@ mod tests {
         let host_control = HostControl::new();
         let adapter = Adapter::new();
         let facts = BufferedFactsStore::new();
-        let facts_path = std::path::PathBuf::from("/tmp/barrel-test-host-control-download.json");
 
         host_control
-            .download_update(&unreachable_ctx(), &adapter, &facts, &facts_path)
+            .download_update(&unreachable_ctx(), &adapter, &facts)
             .await;
 
         assert_eq!(adapter.state(), AdapterState::Idle);
@@ -149,9 +160,10 @@ mod tests {
     async fn apply_update_is_a_no_op_when_nothing_has_downloaded() {
         let host_control = HostControl::new();
         let adapter = Adapter::new();
+        let facts = BufferedFactsStore::new();
 
         host_control
-            .apply_update(&unreachable_ctx(), &adapter)
+            .apply_update(&unreachable_ctx(), &adapter, &facts)
             .await;
 
         // No panic and no state change is the whole assertion -- there's
@@ -164,10 +176,9 @@ mod tests {
         let host_control = HostControl::new();
         let adapter = Adapter::new();
         let facts = BufferedFactsStore::new();
-        let facts_path = std::path::PathBuf::from("/tmp/barrel-test-host-control-maybe.json");
 
         host_control
-            .maybe_download(&unreachable_ctx(), &adapter, &facts, &facts_path, false)
+            .maybe_download(&unreachable_ctx(), &adapter, &facts, false)
             .await;
 
         assert_eq!(adapter.state(), AdapterState::Idle);
