@@ -4,17 +4,17 @@ use std::time::Duration;
 use tauri::{AppHandle, Runtime};
 use tokio::sync::Notify;
 
-use crate::adapter::Adapter;
+use crate::adapters::Adapter;
 use crate::env::collect_environment;
-use crate::host_control::HostControl;
+use crate::host_control::{ActionContext, HostControl};
 use crate::jitter::compute_jitter_fraction;
-use crate::persistence::buffered_facts::BufferedFactsStore;
+use crate::persistence::buffered_facts::{BufferedFact, BufferedFactsStore};
 use crate::persistence::key_rotation::TrustedKeyStore;
 use crate::protocol::check_in::{
     now_epoch_millis, parse_iso8601_to_epoch_millis, send_check_in, CheckInParams,
 };
 use crate::protocol::policy::verify_and_parse_policy;
-use crate::types::{InitConfig, Policy};
+use crate::types::{CheckInResponse, InitConfig, Policy};
 
 pub const DEFAULT_INTERVAL_MS: u64 = 30 * 60 * 1000;
 pub const MIN_INTERVAL_MS: u64 = 15 * 60 * 1000;
@@ -25,7 +25,6 @@ pub struct CadenceShared<R: Runtime> {
     pub client: reqwest::Client,
     pub adapter: Adapter,
     pub facts: BufferedFactsStore,
-    pub facts_path: std::path::PathBuf,
     pub trusted_keys: TrustedKeyStore,
     pub trusted_key_path: std::path::PathBuf,
     pub host_control: HostControl,
@@ -35,6 +34,29 @@ pub struct CadenceShared<R: Runtime> {
     pub log: Box<dyn Fn(&str) + Send + Sync>,
     /// A fresh tick while one is already in flight is skipped, not queued.
     pub in_flight: AtomicBool,
+}
+
+impl<R: Runtime> CadenceShared<R> {
+    /// Every call site resolves `base_url`/`trusted_key_pem` fresh via
+    /// `resolve_connection_fields` first, then builds its context from here.
+    ///
+    /// A method on `CadenceShared` itself, rather than a free function
+    /// reaching into it from another module -- the two modules no longer
+    /// need to know about each other's internals this way.
+    pub(crate) fn action_context<'a>(
+        &'a self,
+        base_url: &'a str,
+        trusted_key_pem: &'a str,
+    ) -> ActionContext<'a> {
+        ActionContext {
+            client: &self.client,
+            base_url,
+            credential: &self.config.credential,
+            installation_id: &self.installation_id,
+            trusted_key_pem,
+            log: self.log.as_ref(),
+        }
+    }
 }
 
 /// Checks in on launch, then on a jittered interval, plus on
@@ -74,8 +96,10 @@ pub fn start_cadence<R: Runtime>(shared: Arc<CadenceShared<R>>) -> Arc<Notify> {
 
 /// Resolves `base_url`/`trusted_key_pem`, falling back to the SDK's own
 /// embedded defaults -- shared by every call site that builds an
-/// `ActionContext`. Any key rotation a check-in response carries takes
-/// effect from the next resolution on, never retroactively within one call.
+/// `ActionContext`.
+///
+/// Any key rotation a check-in response carries takes effect from the
+/// next resolution on, never retroactively within one call.
 pub(crate) async fn resolve_connection_fields(
     config: &InitConfig,
     trusted_keys: &TrustedKeyStore,
@@ -114,25 +138,17 @@ async fn tick<R: Runtime>(shared: &Arc<CadenceShared<R>>) {
     ) {
         shared
             .adapter
-            .check_for_updates(&shared.app, &shared.facts, &shared.facts_path)
+            .check_for_updates(&shared.app, &shared.facts)
             .await;
     }
 
-    let ctx = crate::host_control::ActionContext {
-        client: &shared.client,
-        base_url: &base_url,
-        credential: &shared.config.credential,
-        installation_id: &shared.installation_id,
-        trusted_key_pem: &trusted_key_pem,
-        log: shared.log.as_ref(),
-    };
+    let ctx = shared.action_context(&base_url, &trusted_key_pem);
     shared
         .host_control
         .maybe_download(
             &ctx,
             &shared.adapter,
             &shared.facts,
-            &shared.facts_path,
             shared.config.auto_download.unwrap_or(true),
         )
         .await;
@@ -163,26 +179,32 @@ async fn tick<R: Runtime>(shared: &Arc<CadenceShared<R>>) {
     .await;
 
     if let Some(response) = &response {
-        shared
-            .facts
-            .clear(&shared.facts_path, &buffered_facts)
-            .await;
-
-        match verify_and_parse_policy(response, &trusted_key_pem) {
-            Some(policy) => {
-                (shared.log)("policy: verified and updated");
-                crate::POLICY.lock().unwrap().replace(policy);
-            }
-            None => (shared.log)("policy: verification failed"),
-        }
-
-        shared
-            .trusted_keys
-            .apply_rotation_if_present(&shared.trusted_key_path, response)
-            .await;
+        apply_check_in_response(shared, response, &buffered_facts, &trusted_key_pem).await;
     }
 
     shared.in_flight.store(false, Ordering::SeqCst);
+}
+
+async fn apply_check_in_response<R: Runtime>(
+    shared: &Arc<CadenceShared<R>>,
+    response: &CheckInResponse,
+    buffered_facts: &[BufferedFact],
+    trusted_key_pem: &str,
+) {
+    shared.facts.clear(buffered_facts).await;
+
+    match verify_and_parse_policy(response, trusted_key_pem) {
+        Some(policy) => {
+            (shared.log)("policy: verified and updated");
+            crate::POLICY.lock().unwrap().replace(policy);
+        }
+        None => (shared.log)("policy: verification failed"),
+    }
+
+    shared
+        .trusted_keys
+        .apply_rotation_if_present(&shared.trusted_key_path, response)
+        .await;
 }
 
 /// Only a confirmed `held` Policy still within its ceiling holds the check --

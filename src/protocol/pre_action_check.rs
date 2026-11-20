@@ -2,23 +2,33 @@ use serde::Serialize;
 use std::time::Duration;
 
 use super::policy::verify_and_parse_policy;
-use super::request::{post_and_validate_envelope, RequestEnvelopeParams};
+use super::protocol_request::{post_protocol_request, PostProtocolRequestParams};
 use crate::types::{Policy, PROTOCOL_VERSION};
 
 const PRE_ACTION_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Which point in the update lifecycle a pre-action check guards.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Stage {
+    /// Before downloading an available update.
     PreDownload,
+    /// Before applying a downloaded update.
     PreApply,
 }
 
+/// Parameters for one `check_pre_action` call.
+#[derive(Debug)]
 pub struct PreActionCheckParams<'a> {
+    /// The check-in endpoint's base URL.
     pub base_url: &'a str,
+    /// Sent as a bearer token.
     pub credential: &'a str,
+    /// Stable per-install identifier.
     pub installation_id: &'a str,
+    /// Which lifecycle point this check guards.
     pub stage: Stage,
+    /// The key this response's signature is verified against.
     pub trusted_key_pem: &'a str,
 }
 
@@ -44,9 +54,9 @@ pub async fn check_pre_action(
         stage: params.stage,
     };
 
-    let parsed = post_and_validate_envelope(
+    let parsed = post_protocol_request(
         client,
-        RequestEnvelopeParams {
+        PostProtocolRequestParams {
             base_url: params.base_url,
             path: "/pre-action-check",
             credential: params.credential,

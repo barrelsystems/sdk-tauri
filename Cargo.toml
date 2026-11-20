@@ -5,6 +5,10 @@ edition = "2021"
 description = "Barrel's release-intelligence SDK for Tauri apps."
 license = "MIT"
 repository = "https://github.com/barrelsystems/sdk-tauri"
+# The test service is never shipped (see the `test-service` feature below) --
+# excluded here too, so its source isn't dead weight in every consumer's
+# downloaded tarball.
+exclude = ["test-service/"]
 
 [lib]
 name = "tauri_plugin_barrel_kit"
@@ -29,6 +33,41 @@ uuid = { version = "1", features = ["v4"] }
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "time", "sync", "macros", "test-util"] }
 tempfile = "3"
+
+[features]
+# Never shipped -- isolates the test service's own dependencies (axum,
+# minisign) from the library consumers actually build against.
+test-service = [
+  "dep:axum",
+  "dep:minisign",
+  "dep:tauri-build",
+  "dep:futures-util",
+  "tauri/test",
+  "tokio/process",
+  "tokio/io-util",
+]
+
+[dependencies.axum]
+version = "0.8"
+optional = true
+features = ["macros"]
+
+[dependencies.minisign]
+version = "0.10"
+optional = true
+
+[dependencies.futures-util]
+version = "0.3"
+optional = true
+default-features = false
+
+[build-dependencies]
+tauri-build = { version = "2", optional = true }
+
+[[bin]]
+name = "test-service"
+path = "test-service/main.rs"
+required-features = ["test-service"]
 
 [profile.release]
 # This SDK ships inside other people's apps -- a smaller binary is a cost

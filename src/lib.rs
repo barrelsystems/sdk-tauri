@@ -1,4 +1,9 @@
-mod adapter;
+//! Barrel's release-intelligence SDK for Tauri apps. Wraps
+//! `tauri-plugin-updater`, reporting every check and update attempt back
+//! to Barrel so you can see what's actually happening on your users' machines.
+#![warn(missing_docs, missing_debug_implementations)]
+
+mod adapters;
 mod attributes;
 mod cadence;
 mod env;
@@ -9,6 +14,12 @@ mod internal_defects;
 mod jitter;
 mod keys;
 mod persistence;
+/// Wire-protocol primitives (check-in, pre-action-check, Policy
+/// verification) this crate's own test service calls directly -- public
+/// only under `test-service`, which a normal consumer never enables.
+#[cfg(feature = "test-service")]
+pub mod protocol;
+#[cfg(not(feature = "test-service"))]
 mod protocol;
 mod types;
 
@@ -16,7 +27,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{plugin::TauriPlugin, AppHandle, Manager, RunEvent, Runtime, WindowEvent};
 
-use adapter::Adapter;
+use adapters::Adapter;
 use cadence::{start_cadence, CadenceShared};
 use host_control::HostControl;
 use persistence::buffered_facts::BufferedFactsStore;
@@ -39,9 +50,18 @@ pub fn get_policy() -> Option<Policy> {
     POLICY.lock().unwrap().clone()
 }
 
-/// Synchronous getter. `None` if nothing has failed this session.
+/// Synchronous getter. Falls back to the most recent buffered
+/// `updateError` fact when the adapter's own in-memory last-error is
+/// empty.
+///
+/// That's the case on a fresh process that crashed or was killed before
+/// this session ever ran. `None` only if nothing's failed at all.
 pub fn get_last_update_error<R: Runtime>(app: &AppHandle<R>) -> Option<UpdateFailure> {
-    shared_for::<R>(app).and_then(|shared| shared.adapter.last_error())
+    let shared = shared_for::<R>(app)?;
+    shared
+        .adapter
+        .last_error()
+        .or_else(|| shared.facts.latest_update_error())
 }
 
 /// Synchronous getter. `None` before the plugin's `setup` hook has run.
@@ -66,17 +86,10 @@ pub fn apply_update<R: Runtime>(app: &AppHandle<R>) {
     tauri::async_runtime::spawn(async move {
         let (base_url, trusted_key_pem) =
             cadence::resolve_connection_fields(&shared.config, &shared.trusted_keys).await;
-        let ctx = host_control::ActionContext {
-            client: &shared.client,
-            base_url: &base_url,
-            credential: &shared.config.credential,
-            installation_id: &shared.installation_id,
-            trusted_key_pem: &trusted_key_pem,
-            log: shared.log.as_ref(),
-        };
+        let ctx = shared.action_context(&base_url, &trusted_key_pem);
         shared
             .host_control
-            .apply_update(&ctx, &shared.adapter)
+            .apply_update(&ctx, &shared.adapter, &shared.facts)
             .await;
     });
 }
@@ -90,17 +103,10 @@ pub fn download_update<R: Runtime>(app: &AppHandle<R>) {
     tauri::async_runtime::spawn(async move {
         let (base_url, trusted_key_pem) =
             cadence::resolve_connection_fields(&shared.config, &shared.trusted_keys).await;
-        let ctx = host_control::ActionContext {
-            client: &shared.client,
-            base_url: &base_url,
-            credential: &shared.config.credential,
-            installation_id: &shared.installation_id,
-            trusted_key_pem: &trusted_key_pem,
-            log: shared.log.as_ref(),
-        };
+        let ctx = shared.action_context(&base_url, &trusted_key_pem);
         shared
             .host_control
-            .download_update(&ctx, &shared.adapter, &shared.facts, &shared.facts_path)
+            .download_update(&ctx, &shared.adapter, &shared.facts)
             .await;
     });
 }
@@ -113,6 +119,7 @@ fn shared_for<R: Runtime>(_app: &AppHandle<R>) -> Option<Arc<CadenceShared<R>>> 
 /// this plugin directly -- full-wrap means `tauri-plugin-updater` is this
 /// crate's own implementation detail, not something the host registers.
 pub trait BarrelKitExt<R: Runtime> {
+    /// Wires Barrel's updater into this builder. Call once, before `.build()`.
     fn barrel_kit(self, config: InitConfig) -> Self;
 }
 
@@ -126,9 +133,19 @@ impl<R: Runtime> BarrelKitExt<R> for tauri::Builder<R> {
 fn plugin<R: Runtime>(config: InitConfig) -> TauriPlugin<R> {
     tauri::plugin::Builder::new("barrel-kit")
         .setup(move |app, _api| {
+            // A second `barrel_kit()` call must be a silent no-op, never a
+            // validation error -- checked synchronously here, before any
+            // config validation runs.
+
+            // This way a second call with e.g. a blank credential still
+            // no-ops instead of throwing.
+            if SHARED.get().is_some() {
+                return Ok(());
+            }
+
             if config.credential.trim().is_empty() {
-                return Err(Box::new(BarrelConfigError(
-                    "Barrel: init() requires a non-empty `credential`.".to_string(),
+                return Err(Box::new(BarrelConfigError::new(
+                    "Barrel: init() requires a non-empty `credential`.",
                 )));
             }
             if let Err(err) = validate_hold_cache_max_age(config.hold_cache_max_age_ms) {
@@ -160,7 +177,7 @@ fn plugin<R: Runtime>(config: InitConfig) -> TauriPlugin<R> {
             // needs this synchronous, guaranteed-to-run fallback.
             RunEvent::Exit => {
                 if let Some(shared) = shared_for::<R>(app) {
-                    shared.facts.flush_sync(&shared.facts_path);
+                    shared.facts.flush_sync();
                 }
             }
             _ => {}
@@ -173,9 +190,8 @@ fn validate_hold_cache_max_age(
 ) -> Result<(), BarrelConfigError> {
     if let Some(ms) = hold_cache_max_age_ms {
         if ms > MAX_HOLD_CACHE_MAX_AGE_MS {
-            return Err(BarrelConfigError(
-                "Barrel: init() config's `hold_cache_max_age_ms` must not exceed 7 days."
-                    .to_string(),
+            return Err(BarrelConfigError::new(
+                "Barrel: init() config's `hold_cache_max_age_ms` must not exceed 7 days.",
             ));
         }
     }
@@ -227,7 +243,6 @@ async fn bootstrap<R: Runtime>(app: AppHandle<R>, config: InitConfig) {
         client,
         adapter,
         facts,
-        facts_path,
         trusted_keys,
         trusted_key_path,
         host_control: HostControl::new(),
