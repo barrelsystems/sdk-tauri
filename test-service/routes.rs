@@ -70,6 +70,17 @@ async fn create_adapter(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| r#"{"kind":"noUpdate"}"#.to_string());
 
+    // Bounded well above any real MockResponse's encoded size -- rejects a
+    // pathological payload before it ever reaches the deserializer.
+    const MAX_VARIANT_JSON_LEN: usize = 4096;
+    if variant_json.len() > MAX_VARIANT_JSON_LEN {
+        return (
+            StatusCode::BAD_REQUEST,
+            "variant JSON exceeds the size limit",
+        )
+            .into_response();
+    }
+
     // Deserialize straight into the strict, validated type -- never hold
     // onto the untyped `Value` this parses through, so nothing downstream
     // can see a field this type doesn't itself constrain.

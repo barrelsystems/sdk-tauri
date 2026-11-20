@@ -14,7 +14,7 @@ use std::time::Duration;
 /// adapter's one automatic check at startup -- configured before the
 /// Tauri app is built, since there's no public hook to re-trigger a check.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum MockResponse {
     /// 204 No Content.
     NoUpdate,
