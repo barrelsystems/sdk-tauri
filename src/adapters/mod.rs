@@ -61,7 +61,7 @@ impl Adapter {
         self.last_error.lock().unwrap().clone()
     }
 
-    async fn set_state(&self, facts: &BufferedFactsStore, state: AdapterState) {
+    async fn set_state<R: Runtime>(&self, facts: &BufferedFactsStore<R>, state: AdapterState) {
         *self.state.lock().unwrap() = state.clone();
         let _ = self.state_tx.send(state.clone());
         facts.record_adapter_state(state).await;
@@ -78,7 +78,7 @@ impl Adapter {
     pub async fn check_for_updates<R: Runtime>(
         &self,
         app: &AppHandle<R>,
-        facts: &BufferedFactsStore,
+        facts: &BufferedFactsStore<R>,
     ) {
         self.set_state(facts, AdapterState::Checking).await;
 
@@ -120,7 +120,7 @@ impl Adapter {
 
     /// Downloads the update `check_for_updates` found. A no-op if nothing
     /// is pending (already downloaded, or no update was ever available).
-    pub async fn download_update(&self, facts: &BufferedFactsStore) {
+    pub async fn download_update<R: Runtime>(&self, facts: &BufferedFactsStore<R>) {
         let mut pending = self.pending_update.lock().await;
         let Some(update) = pending.take() else { return };
 
@@ -167,7 +167,7 @@ impl Adapter {
     ///
     /// On a failed install, transitions to `Failed` instead of leaving the
     /// adapter stuck at `Downloaded`.
-    pub async fn quit_and_install(&self, facts: &BufferedFactsStore) {
+    pub async fn quit_and_install<R: Runtime>(&self, facts: &BufferedFactsStore<R>) {
         let update = self.pending_update.lock().await.take();
         let bytes = self.downloaded_bytes.lock().await.take();
 
@@ -188,9 +188,9 @@ impl Adapter {
     /// The `install()` error-handling half of `quit_and_install`, split out
     /// so it can be driven by a directly-constructed `Err` in tests without
     /// needing a real downloaded `Update` to force failure through.
-    async fn handle_install_result(
+    async fn handle_install_result<R: Runtime>(
         &self,
-        facts: &BufferedFactsStore,
+        facts: &BufferedFactsStore<R>,
         result: Result<(), tauri_plugin_updater::Error>,
     ) {
         if let Err(error) = result {
@@ -203,16 +203,16 @@ impl Adapter {
     /// Always `Phase::Unknown`/`UpdateFailureMode::Unknown` -- only fires when
     /// *building* the updater itself fails, never a real
     /// `tauri_plugin_updater::Error` the mapping table classifies.
-    async fn record_updater_error(&self, facts: &BufferedFactsStore, message: &str) {
+    async fn record_updater_error<R: Runtime>(&self, facts: &BufferedFactsStore<R>, message: &str) {
         self.record_failure(facts, UpdateFailureMode::Unknown, Phase::Unknown, message)
             .await;
     }
 
     /// Classifies, tallies, and buffers one failure -- shared by every
     /// errored codepath above so the fail/record sequence lives in one place.
-    async fn record_failure(
+    async fn record_failure<R: Runtime>(
         &self,
-        facts: &BufferedFactsStore,
+        facts: &BufferedFactsStore<R>,
         failure_mode: UpdateFailureMode,
         phase: Phase,
         platform_code: &str,
@@ -233,6 +233,7 @@ impl Default for Adapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::persistence::test_support::mock_app;
     use crate::types::{Phase, UpdateFailureMode};
 
     #[test]
@@ -271,7 +272,8 @@ mod tests {
             .unwrap_or(0);
 
         let adapter = Adapter::new();
-        let facts = BufferedFactsStore::new();
+        let app = mock_app();
+        let facts = BufferedFactsStore::new(app.handle().clone());
         adapter.quit_and_install(&facts).await; // nothing pending -- out-of-sequence call
 
         let after = crate::internal_defects::get_internal_defect_counts()
@@ -284,7 +286,8 @@ mod tests {
     #[tokio::test]
     async fn a_failed_install_transitions_to_failed_instead_of_staying_stuck_at_downloaded() {
         let adapter = Adapter::new();
-        let facts = BufferedFactsStore::new();
+        let app = mock_app();
+        let facts = BufferedFactsStore::new(app.handle().clone());
         adapter.fail(
             AdapterState::Downloaded,
             build_failure_state(PLATFORM, UpdateFailureMode::Unknown, Phase::Unknown, "x").0,
@@ -308,7 +311,8 @@ mod tests {
     async fn available_state_carries_release_notes_through_to_subscribers() {
         let adapter = Adapter::new();
         let mut rx = adapter.subscribe_state();
-        let facts = BufferedFactsStore::new();
+        let app = mock_app();
+        let facts = BufferedFactsStore::new(app.handle().clone());
 
         adapter
             .set_state(

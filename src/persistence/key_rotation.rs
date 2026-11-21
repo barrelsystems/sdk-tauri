@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::path::Path;
+use tauri::{AppHandle, Runtime};
 use tokio::sync::Mutex;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -10,30 +11,33 @@ use crate::types::CheckInResponse;
 
 /// Resolves, and -- when a signed rotation announcement arrives -- updates,
 /// the Ed25519 public key this SDK verifies Policy responses against.
-pub struct TrustedKeyStore {
+pub struct TrustedKeyStore<R: Runtime> {
     cached: Mutex<Option<String>>,
-    disk: DiskStore,
+    disk: DiskStore<R>,
 }
 
-impl TrustedKeyStore {
-    pub fn new() -> Self {
+impl<R: Runtime> TrustedKeyStore<R> {
+    pub fn new(app: AppHandle<R>) -> Self {
         Self {
             cached: Mutex::new(None),
-            disk: DiskStore::new(),
+            disk: DiskStore::new(app),
         }
     }
 
     /// Reads a previously-adopted rotation cached on disk, or falls back to
     /// the build-time default. Call once at startup, before the first
     /// check-in's Policy is verified.
-    pub async fn get_or_create(&self, path: &PathBuf, built_in_key_pem: &str) -> String {
+    pub async fn get_or_create(&self, path: &Path, built_in_key_pem: &str) -> String {
         let mut cached = self.cached.lock().await;
         if let Some(key) = cached.as_ref() {
             return key.clone();
         }
 
-        let key = read_existing(path)
+        let key = self
+            .disk
+            .read(path, "publicKeyPem")
             .await
+            .and_then(|value| value.as_str().map(str::to_string))
             .unwrap_or_else(|| built_in_key_pem.to_string());
         *cached = Some(key.clone());
         key
@@ -47,7 +51,7 @@ impl TrustedKeyStore {
     /// Verifies a rotation announcement against the key this SDK ALREADY
     /// trusts, never the new key -- a key can only vouch for its own
     /// successor. Any failure fails open, leaving the current key in effect.
-    pub async fn apply_rotation_if_present(&self, path: &PathBuf, response: &CheckInResponse) {
+    pub async fn apply_rotation_if_present(&self, path: &Path, response: &CheckInResponse) {
         let (Some(next_public_key_pem), Some(next_public_key_signature)) = (
             response.next_public_key_pem.as_ref(),
             response.next_public_key_signature.as_ref(),
@@ -55,8 +59,9 @@ impl TrustedKeyStore {
             return;
         };
 
-        // Held for the whole check-then-adopt so a concurrent rotation
-        // attempt can't race this one between reading and writing `cached`.
+        // Held across the disk write too, not just the in-memory update --
+        // two concurrent rotations could otherwise leave the on-disk key
+        // out of sync with whichever one `cached` ends up holding.
         let mut cached = self.cached.lock().await;
         let Some(current_key_pem) = cached.clone() else {
             return;
@@ -73,16 +78,10 @@ impl TrustedKeyStore {
         }
 
         *cached = Some(next_public_key_pem.clone());
-        drop(cached);
 
-        let snapshot = serde_json::json!({ "publicKeyPem": next_public_key_pem }).to_string();
-        self.disk.persist(path, &snapshot).await;
-    }
-}
-
-impl Default for TrustedKeyStore {
-    fn default() -> Self {
-        Self::new()
+        self.disk
+            .write(path, "publicKeyPem", serde_json::json!(next_public_key_pem))
+            .await;
     }
 }
 
@@ -105,15 +104,10 @@ fn verify_rotation(
     Some(())
 }
 
-async fn read_existing(path: &PathBuf) -> Option<String> {
-    let raw = tokio::fs::read_to_string(path).await.ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    parsed.get("publicKeyPem")?.as_str().map(str::to_string)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::persistence::test_support::mock_app;
     use ed25519_dalek::{Signer, SigningKey};
     use pkcs8::EncodePublicKey;
     use tempfile::NamedTempFile;
@@ -149,7 +143,8 @@ mod tests {
         let path = file.path().to_path_buf();
         std::fs::remove_file(&path).unwrap();
 
-        let store = TrustedKeyStore::new();
+        let app = mock_app();
+        let store = TrustedKeyStore::new(app.handle().clone());
         let trusted = store.get_or_create(&path, "built-in-key-pem").await;
         assert_eq!(trusted, "built-in-key-pem");
     }
@@ -164,7 +159,8 @@ mod tests {
         let (_, next_pem) = keypair_from_seed(2);
         let next_signature = STANDARD.encode(current_signing.sign(next_pem.as_bytes()).to_bytes());
 
-        let store = TrustedKeyStore::new();
+        let app = mock_app();
+        let store = TrustedKeyStore::new(app.handle().clone());
         store.get_or_create(&path, &current_pem).await;
         store
             .apply_rotation_if_present(
@@ -188,7 +184,8 @@ mod tests {
         let (_, next_pem) = keypair_from_seed(5);
         let next_signature = STANDARD.encode(imposter_signing.sign(next_pem.as_bytes()).to_bytes());
 
-        let store = TrustedKeyStore::new();
+        let app = mock_app();
+        let store = TrustedKeyStore::new(app.handle().clone());
         store.get_or_create(&path, &current_pem).await;
         store
             .apply_rotation_if_present(&path, &base_response(Some(next_pem), Some(next_signature)))
@@ -204,7 +201,8 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
 
         let (_signing, current_pem) = keypair_from_seed(6);
-        let store = TrustedKeyStore::new();
+        let app = mock_app();
+        let store = TrustedKeyStore::new(app.handle().clone());
         store.get_or_create(&path, &current_pem).await;
         store
             .apply_rotation_if_present(&path, &base_response(None, None))
@@ -224,7 +222,8 @@ mod tests {
         let malformed_key = "not a real PEM".to_string();
         let signature = STANDARD.encode(current_signing.sign(malformed_key.as_bytes()).to_bytes());
 
-        let store = TrustedKeyStore::new();
+        let app = mock_app();
+        let store = TrustedKeyStore::new(app.handle().clone());
         store.get_or_create(&path, &current_pem).await;
         store
             .apply_rotation_if_present(&path, &base_response(Some(malformed_key), Some(signature)))
@@ -243,7 +242,8 @@ mod tests {
         let (_, next_pem) = keypair_from_seed(9);
         let next_signature = STANDARD.encode(current_signing.sign(next_pem.as_bytes()).to_bytes());
 
-        let first = TrustedKeyStore::new();
+        let first_app = mock_app();
+        let first = TrustedKeyStore::new(first_app.handle().clone());
         first.get_or_create(&path, &current_pem).await;
         first
             .apply_rotation_if_present(
@@ -252,7 +252,11 @@ mod tests {
             )
             .await;
 
-        let second = TrustedKeyStore::new(); // a fresh instance -- no in-memory cache
+        // A separate mock app -- its own `AppHandle` and resource table,
+        // so no cached `Store` from `first` can leak through here. Only a
+        // genuine disk read makes this pass.
+        let second_app = mock_app();
+        let second = TrustedKeyStore::new(second_app.handle().clone());
         let resolved = second
             .get_or_create(&path, "a-different-build-time-default")
             .await;
@@ -273,7 +277,8 @@ mod tests {
         let (_, next_pem) = keypair_from_seed(11);
         let next_signature = STANDARD.encode(current_signing.sign(next_pem.as_bytes()).to_bytes());
 
-        let store = TrustedKeyStore::new();
+        let app = mock_app();
+        let store = TrustedKeyStore::new(app.handle().clone());
         store.get_or_create(&path, &current_pem).await;
         store
             .apply_rotation_if_present(

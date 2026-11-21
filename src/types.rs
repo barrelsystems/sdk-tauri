@@ -7,6 +7,18 @@ use crate::persistence::buffered_facts::BufferedFact;
 /// bumped only on a breaking change to its shape.
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// The three fields every backend round-trip needs, bundled once instead
+/// of traveling as three separate params on every protocol-adjacent type.
+#[derive(Debug, Clone, Copy)]
+pub struct BackendConnection<'a> {
+    /// The check-in endpoint's base URL.
+    pub base_url: &'a str,
+    /// Sent as a bearer token.
+    pub credential: &'a str,
+    /// Stable per-install identifier.
+    pub installation_id: &'a str,
+}
+
 /// Config passed to `init()`. `credential` is the only required field.
 #[derive(Debug, Clone, Default)]
 pub struct InitConfig {

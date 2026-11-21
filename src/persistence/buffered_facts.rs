@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use tauri::{AppHandle, Runtime};
 use tokio::sync::Mutex;
 
 use super::disk_store::DiskStore;
@@ -119,35 +120,35 @@ impl BufferedFact {
     }
 }
 
-pub struct BufferedFactsStore {
+pub struct BufferedFactsStore<R: Runtime> {
     buffer: Mutex<Vec<BufferedFact>>,
-    disk: DiskStore,
+    disk: DiskStore<R>,
     // Bound once via `configure()` and never changed afterward -- every
     // other method reads this instead of taking its own `path` argument.
     path: std::sync::OnceLock<PathBuf>,
 }
 
-impl BufferedFactsStore {
-    pub fn new() -> Self {
+impl<R: Runtime> BufferedFactsStore<R> {
+    pub fn new(app: AppHandle<R>) -> Self {
         Self {
             buffer: Mutex::new(Vec::new()),
-            disk: DiskStore::new(),
+            disk: DiskStore::new(app),
             path: std::sync::OnceLock::new(),
         }
     }
 
     /// Binds this store's on-disk path and hydrates the in-memory buffer
     /// from it. Call once at startup, before any fact is recorded.
-    pub async fn configure(&self, path: &PathBuf) {
-        let _ = self.path.set(path.clone());
+    pub async fn configure(&self, path: &Path) {
+        let _ = self.path.set(path.to_path_buf());
 
-        let Ok(raw) = tokio::fs::read_to_string(path).await else {
+        let Some(value) = self.disk.read(path, "facts").await else {
             return;
         };
-        let Ok(parsed) = serde_json::from_str::<FactsOnDisk>(&raw) else {
+        let Ok(facts) = serde_json::from_value::<Vec<BufferedFact>>(value) else {
             return;
         };
-        *self.buffer.lock().await = parsed.facts;
+        *self.buffer.lock().await = facts;
     }
 
     /// A snapshot of the current facts, for inclusion in a check-in
@@ -247,11 +248,10 @@ impl BufferedFactsStore {
 
     async fn persist_locked(&self, buffer: &[BufferedFact]) {
         let Some(path) = self.path.get() else { return };
-        let snapshot = serde_json::to_string(&FactsOnDisk {
-            facts: buffer.to_vec(),
-        })
-        .unwrap_or_default();
-        self.disk.persist(path, &snapshot).await;
+        let Ok(value) = serde_json::to_value(buffer) else {
+            return;
+        };
+        self.disk.write(path, "facts", value).await;
     }
 
     /// The reserved synchronous path for process exit (`RunEvent::Exit`),
@@ -265,24 +265,11 @@ impl BufferedFactsStore {
         let Ok(buffer) = self.buffer.try_lock() else {
             return;
         };
-        let Ok(snapshot) = serde_json::to_string(&FactsOnDisk {
-            facts: buffer.to_vec(),
-        }) else {
+        let Ok(value) = serde_json::to_value(&*buffer) else {
             return;
         };
-        let _ = std::fs::write(path, snapshot);
+        self.disk.write_sync(path, "facts", value);
     }
-}
-
-impl Default for BufferedFactsStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-struct FactsOnDisk {
-    facts: Vec<BufferedFact>,
 }
 
 fn find_eviction_candidate_index(buffer: &[BufferedFact]) -> Option<usize> {
@@ -307,6 +294,7 @@ fn now_iso8601() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::persistence::test_support::mock_app;
     use crate::types::{FailureCategory, UpdateFailureMode};
     use tempfile::NamedTempFile;
 
@@ -330,7 +318,8 @@ mod tests {
 
     #[tokio::test]
     async fn merges_a_repeated_fact_instead_of_duplicating_it() {
-        let store = BufferedFactsStore::new();
+        let app = mock_app();
+        let store = BufferedFactsStore::new(app.handle().clone());
         let path = NamedTempFile::new().unwrap().path().to_path_buf();
         store.configure(&path).await;
 
@@ -344,7 +333,8 @@ mod tests {
 
     #[tokio::test]
     async fn clear_only_removes_facts_present_in_the_sent_snapshot() {
-        let store = BufferedFactsStore::new();
+        let app = mock_app();
+        let store = BufferedFactsStore::new(app.handle().clone());
         let path = NamedTempFile::new().unwrap().path().to_path_buf();
         store.configure(&path).await;
 
@@ -367,7 +357,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_full_buffer_of_terminal_facts_drops_an_incoming_intermediate_one() {
-        let store = BufferedFactsStore::new();
+        let app = mock_app();
+        let store = BufferedFactsStore::new(app.handle().clone());
         let path = NamedTempFile::new().unwrap().path().to_path_buf();
         store.configure(&path).await;
 
@@ -384,7 +375,8 @@ mod tests {
 
     #[tokio::test]
     async fn latest_update_error_picks_the_most_recently_observed_one() {
-        let store = BufferedFactsStore::new();
+        let app = mock_app();
+        let store = BufferedFactsStore::new(app.handle().clone());
         let path = NamedTempFile::new().unwrap().path().to_path_buf();
         store.configure(&path).await;
 
@@ -397,7 +389,27 @@ mod tests {
 
     #[tokio::test]
     async fn latest_update_error_is_none_when_nothing_is_buffered() {
-        let store = BufferedFactsStore::new();
+        let app = mock_app();
+        let store = BufferedFactsStore::new(app.handle().clone());
         assert!(store.latest_update_error().is_none());
+    }
+
+    #[tokio::test]
+    async fn configure_reads_back_facts_persisted_by_a_fresh_instance_across_a_simulated_restart() {
+        let app = mock_app();
+        let first = BufferedFactsStore::new(app.handle().clone());
+        let path = NamedTempFile::new().unwrap().path().to_path_buf();
+        first.configure(&path).await;
+        first.record_update_error(update_error("first")).await;
+
+        // A separate mock app -- its own `AppHandle` and resource table,
+        // so this can only pass by genuinely reading `path` back.
+        let second_app = mock_app();
+        let second = BufferedFactsStore::new(second_app.handle().clone());
+        second.configure(&path).await;
+
+        let snapshot = second.snapshot().await;
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(second.latest_update_error().unwrap().platform_code, "first");
     }
 }

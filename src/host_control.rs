@@ -1,17 +1,16 @@
 use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::Runtime;
 
 use crate::adapters::Adapter;
 use crate::persistence::buffered_facts::BufferedFactsStore;
 use crate::protocol::pre_action_check::{check_pre_action, PreActionCheckParams, Stage};
-use crate::types::{AdapterState, Policy};
+use crate::types::{AdapterState, BackendConnection, Policy};
 
 /// Everything a pre-action-check needs, bundled once per cadence tick
 /// rather than threaded through as separate positional arguments.
 pub struct ActionContext<'a> {
     pub client: &'a reqwest::Client,
-    pub base_url: &'a str,
-    pub credential: &'a str,
-    pub installation_id: &'a str,
+    pub connection: BackendConnection<'a>,
     pub trusted_key_pem: &'a str,
     pub log: &'a (dyn Fn(&str) + Send + Sync),
 }
@@ -29,9 +28,7 @@ async fn can_proceed(ctx: &ActionContext<'_>, stage: Stage) -> bool {
     let policy = check_pre_action(
         ctx.client,
         PreActionCheckParams {
-            base_url: ctx.base_url,
-            credential: ctx.credential,
-            installation_id: ctx.installation_id,
+            connection: ctx.connection,
             stage,
             trusted_key_pem: ctx.trusted_key_pem,
         },
@@ -55,11 +52,11 @@ impl HostControl {
 
     /// Call after `Adapter::check_for_updates` -- downloads only if the
     /// adapter landed on `Available` and the host has `auto_download` on.
-    pub async fn maybe_download(
+    pub async fn maybe_download<R: Runtime>(
         &self,
         ctx: &ActionContext<'_>,
         adapter: &Adapter,
-        facts: &BufferedFactsStore,
+        facts: &BufferedFactsStore<R>,
         auto_download: bool,
     ) {
         if auto_download {
@@ -70,11 +67,11 @@ impl HostControl {
     /// Host-triggered earlier download, for a host that set `auto_download:
     /// false` and otherwise had no way to ever complete an update. A no-op,
     /// not an error, unless the adapter is currently `Available`.
-    pub async fn download_update(
+    pub async fn download_update<R: Runtime>(
         &self,
         ctx: &ActionContext<'_>,
         adapter: &Adapter,
-        facts: &BufferedFactsStore,
+        facts: &BufferedFactsStore<R>,
     ) {
         if !matches!(adapter.state(), AdapterState::Available { .. }) {
             return;
@@ -91,11 +88,11 @@ impl HostControl {
     /// Host-triggered earlier apply, ahead of the natural-quit default. A
     /// no-op, not an error, before anything has actually downloaded --
     /// there's nothing yet to apply.
-    pub async fn apply_update(
+    pub async fn apply_update<R: Runtime>(
         &self,
         ctx: &ActionContext<'_>,
         adapter: &Adapter,
-        facts: &BufferedFactsStore,
+        facts: &BufferedFactsStore<R>,
     ) {
         if adapter.state() != AdapterState::Downloaded {
             return;
@@ -127,6 +124,7 @@ impl Default for HostControl {
 mod tests {
     use super::*;
     use crate::persistence::buffered_facts::BufferedFactsStore;
+    use crate::persistence::test_support::mock_app;
 
     // An unreachable address, never actually dialed: every test here exercises
     // only the guard clause that returns before `can_proceed`'s network call.
@@ -134,9 +132,11 @@ mod tests {
         static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
         ActionContext {
             client: CLIENT.get_or_init(reqwest::Client::new),
-            base_url: "http://127.0.0.1:0",
-            credential: "unused",
-            installation_id: "unused",
+            connection: BackendConnection {
+                base_url: "http://127.0.0.1:0",
+                credential: "unused",
+                installation_id: "unused",
+            },
             trusted_key_pem: "unused",
             log: &(|_: &str| {}),
         }
@@ -146,7 +146,8 @@ mod tests {
     async fn download_update_is_a_no_op_when_the_adapter_is_not_available() {
         let host_control = HostControl::new();
         let adapter = Adapter::new();
-        let facts = BufferedFactsStore::new();
+        let app = mock_app();
+        let facts = BufferedFactsStore::new(app.handle().clone());
 
         host_control
             .download_update(&unreachable_ctx(), &adapter, &facts)
@@ -160,7 +161,8 @@ mod tests {
     async fn apply_update_is_a_no_op_when_nothing_has_downloaded() {
         let host_control = HostControl::new();
         let adapter = Adapter::new();
-        let facts = BufferedFactsStore::new();
+        let app = mock_app();
+        let facts = BufferedFactsStore::new(app.handle().clone());
 
         host_control
             .apply_update(&unreachable_ctx(), &adapter, &facts)
@@ -175,7 +177,8 @@ mod tests {
     async fn maybe_download_does_nothing_when_auto_download_is_off() {
         let host_control = HostControl::new();
         let adapter = Adapter::new();
-        let facts = BufferedFactsStore::new();
+        let app = mock_app();
+        let facts = BufferedFactsStore::new(app.handle().clone());
 
         host_control
             .maybe_download(&unreachable_ctx(), &adapter, &facts, false)

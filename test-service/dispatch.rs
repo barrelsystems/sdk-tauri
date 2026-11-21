@@ -20,8 +20,8 @@ use tauri_plugin_barrel_kit::protocol::pre_action_check::{
     check_pre_action, PreActionCheckParams, Stage,
 };
 use tauri_plugin_barrel_kit::{
-    get_adapter_state, get_last_update_error, subscribe_adapter_state, AdapterState, BarrelKitExt,
-    InitConfig, UpdateFailure,
+    get_adapter_state, get_last_update_error, subscribe_adapter_state, AdapterState,
+    BackendConnection, BarrelKitExt, InitConfig, UpdateFailure,
 };
 
 use crate::mock_update_server::{MockResponse, MockUpdateServer};
@@ -58,14 +58,27 @@ struct CheckInState {
     http: reqwest::Client,
     check_in_base_url: String,
     public_key_pem: String,
+    /// Fresh per worker process -- every adapter instance is its own
+    /// process in this SDK, so this is this instance's own identity, the
+    /// same way the other SDKs' test services generate one per instance.
+    installation_id: String,
     /// Serializes `checkNow` the same way the real cadence loop's own
     /// `in_flight` flag does -- two concurrent `checkNow` calls must never
     /// reach the backend at the same time.
     check_in_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
+impl CheckInState {
+    fn connection(&self) -> BackendConnection<'_> {
+        BackendConnection {
+            base_url: &self.check_in_base_url,
+            credential: TEST_CREDENTIAL,
+            installation_id: &self.installation_id,
+        }
+    }
+}
+
 const TEST_CREDENTIAL: &str = "test-service-credential";
-const TEST_INSTALLATION_ID: &str = "test-service-installation";
 
 fn noop_log(_message: &str) {}
 
@@ -125,6 +138,7 @@ pub async fn run(config_json: String) {
             http: reqwest::Client::new(),
             check_in_base_url: worker_config.check_in_base_url,
             public_key_pem: worker_config.public_key_pem,
+            installation_id: uuid::Uuid::new_v4().to_string(),
             check_in_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         },
     };
@@ -294,9 +308,7 @@ async fn check_now(check_in: &CheckInState) -> Response {
     let response = send_check_in(
         &check_in.http,
         CheckInParams {
-            base_url: &check_in.check_in_base_url,
-            credential: TEST_CREDENTIAL,
-            installation_id: TEST_INSTALLATION_ID,
+            connection: check_in.connection(),
             sdk_version: env!("CARGO_PKG_VERSION"),
             observed_version: env!("CARGO_PKG_VERSION"),
             platform: "test",
@@ -340,9 +352,7 @@ async fn trigger_pre_action_check(check_in: &CheckInState, stage: &str) -> Respo
     let policy = check_pre_action(
         &check_in.http,
         PreActionCheckParams {
-            base_url: &check_in.check_in_base_url,
-            credential: TEST_CREDENTIAL,
-            installation_id: TEST_INSTALLATION_ID,
+            connection: check_in.connection(),
             stage,
             trusted_key_pem: &check_in.public_key_pem,
         },
