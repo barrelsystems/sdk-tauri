@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use super::policy::verify_and_parse_policy;
 use super::protocol_request::{post_protocol_request, PostProtocolRequestParams};
-use crate::types::{Policy, PROTOCOL_VERSION};
+use crate::types::{BackendConnection, Policy, PROTOCOL_VERSION};
 
 const PRE_ACTION_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -20,12 +20,8 @@ pub enum Stage {
 /// Parameters for one `check_pre_action` call.
 #[derive(Debug)]
 pub struct PreActionCheckParams<'a> {
-    /// The check-in endpoint's base URL.
-    pub base_url: &'a str,
-    /// Sent as a bearer token.
-    pub credential: &'a str,
-    /// Stable per-install identifier.
-    pub installation_id: &'a str,
+    /// Where this check is sent, and how it authenticates.
+    pub connection: BackendConnection<'a>,
     /// Which lifecycle point this check guards.
     pub stage: Stage,
     /// The key this response's signature is verified against.
@@ -50,16 +46,16 @@ pub async fn check_pre_action(
 ) -> Option<Policy> {
     let body = PreActionCheckBody {
         protocol_version: PROTOCOL_VERSION,
-        installation_id: params.installation_id,
+        installation_id: params.connection.installation_id,
         stage: params.stage,
     };
 
     let parsed = post_protocol_request(
         client,
         PostProtocolRequestParams {
-            base_url: params.base_url,
+            base_url: params.connection.base_url,
             path: "/pre-action-check",
-            credential: params.credential,
+            credential: params.connection.credential,
             timeout: PRE_ACTION_CHECK_TIMEOUT,
             operation: "pre-action-check",
         },

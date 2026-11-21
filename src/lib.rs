@@ -23,7 +23,6 @@ pub mod protocol;
 mod protocol;
 mod types;
 
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{plugin::TauriPlugin, AppHandle, Manager, RunEvent, Runtime, WindowEvent};
 
@@ -35,6 +34,11 @@ use persistence::installation_id::InstallationIdStore;
 use persistence::key_rotation::TrustedKeyStore;
 
 pub use errors::BarrelConfigError;
+/// Bundles `base_url`/`credential`/`installation_id` for the protocol
+/// calls this crate's own test service drives directly -- public only
+/// under `test-service`, same as `protocol` itself.
+#[cfg(feature = "test-service")]
+pub use types::BackendConnection;
 pub use types::{AdapterState, InitConfig, Policy, UpdateFailure, UpdateFailureMode};
 
 static POLICY: Mutex<Option<Policy>> = Mutex::new(None);
@@ -126,6 +130,7 @@ pub trait BarrelKitExt<R: Runtime> {
 impl<R: Runtime> BarrelKitExt<R> for tauri::Builder<R> {
     fn barrel_kit(self, config: InitConfig) -> Self {
         self.plugin(tauri_plugin_updater::Builder::new().build())
+            .plugin(tauri_plugin_store::Builder::default().build())
             .plugin(plugin(config))
     }
 }
@@ -212,21 +217,24 @@ async fn bootstrap<R: Runtime>(app: AppHandle<R>, config: InitConfig) {
         Box::new(|_: &str| {})
     };
 
+    // `tauri build` rejects the placeholder identifier outright, so a real
+    // shipped app always has a real one; this only fails if the OS itself
+    // can't resolve any per-user data directory at all.
     let data_dir = app
         .path()
         .app_data_dir()
-        .unwrap_or_else(|_| PathBuf::from("."));
+        .expect("Barrel: could not resolve this app's data directory");
     let installation_id_path = data_dir.join("barrel-installation.json");
     let facts_path = data_dir.join("barrel-buffered-facts.json");
     let trusted_key_path = data_dir.join("barrel-trusted-key.json");
 
-    let installation_ids = InstallationIdStore::new();
+    let installation_ids = InstallationIdStore::new(app.clone());
     let installation_id = installation_ids.get_or_create(&installation_id_path).await;
 
-    let facts = BufferedFactsStore::new();
+    let facts = BufferedFactsStore::new(app.clone());
     facts.configure(&facts_path).await;
 
-    let trusted_keys = TrustedKeyStore::new();
+    let trusted_keys = TrustedKeyStore::new(app.clone());
     trusted_keys
         .get_or_create(&trusted_key_path, keys::PUBLIC_ED25519_KEY_PEM)
         .await;

@@ -17,6 +17,7 @@ path = "src/lib.rs"
 [dependencies]
 tauri = { version = "2" }
 tauri-plugin-updater = { version = "2" }
+tauri-plugin-store = { version = "2" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -33,6 +34,10 @@ uuid = { version = "1", features = ["v4"] }
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "time", "sync", "macros", "test-util"] }
 tempfile = "3"
+# Unlocks `tauri::test` (mock app/runtime) for plain `cargo test`, without
+# needing the `test-service` feature. Dev-dependency features never leak
+# into a real consumer's build.
+tauri = { version = "2", features = ["test"] }
 
 [features]
 # Never shipped -- isolates the test service's own dependencies (axum,

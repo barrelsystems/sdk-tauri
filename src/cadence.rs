@@ -14,7 +14,7 @@ use crate::protocol::check_in::{
     now_epoch_millis, parse_iso8601_to_epoch_millis, send_check_in, CheckInParams,
 };
 use crate::protocol::policy::verify_and_parse_policy;
-use crate::types::{CheckInResponse, InitConfig, Policy};
+use crate::types::{BackendConnection, CheckInResponse, InitConfig, Policy};
 
 pub const DEFAULT_INTERVAL_MS: u64 = 30 * 60 * 1000;
 pub const MIN_INTERVAL_MS: u64 = 15 * 60 * 1000;
@@ -24,8 +24,8 @@ pub struct CadenceShared<R: Runtime> {
     pub app: AppHandle<R>,
     pub client: reqwest::Client,
     pub adapter: Adapter,
-    pub facts: BufferedFactsStore,
-    pub trusted_keys: TrustedKeyStore,
+    pub facts: BufferedFactsStore<R>,
+    pub trusted_keys: TrustedKeyStore<R>,
     pub trusted_key_path: std::path::PathBuf,
     pub host_control: HostControl,
     pub installation_id: String,
@@ -50,9 +50,11 @@ impl<R: Runtime> CadenceShared<R> {
     ) -> ActionContext<'a> {
         ActionContext {
             client: &self.client,
-            base_url,
-            credential: &self.config.credential,
-            installation_id: &self.installation_id,
+            connection: BackendConnection {
+                base_url,
+                credential: &self.config.credential,
+                installation_id: &self.installation_id,
+            },
             trusted_key_pem,
             log: self.log.as_ref(),
         }
@@ -100,9 +102,9 @@ pub fn start_cadence<R: Runtime>(shared: Arc<CadenceShared<R>>) -> Arc<Notify> {
 ///
 /// Any key rotation a check-in response carries takes effect from the
 /// next resolution on, never retroactively within one call.
-pub(crate) async fn resolve_connection_fields(
+pub(crate) async fn resolve_connection_fields<R: Runtime>(
     config: &InitConfig,
-    trusted_keys: &TrustedKeyStore,
+    trusted_keys: &TrustedKeyStore<R>,
 ) -> (String, String) {
     let base_url = config
         .base_url
@@ -162,9 +164,11 @@ async fn tick<R: Runtime>(shared: &Arc<CadenceShared<R>>) {
     let response = send_check_in(
         &shared.client,
         CheckInParams {
-            base_url: &base_url,
-            credential: &shared.config.credential,
-            installation_id: &shared.installation_id,
+            connection: BackendConnection {
+                base_url: &base_url,
+                credential: &shared.config.credential,
+                installation_id: &shared.installation_id,
+            },
             sdk_version: &shared.sdk_version,
             observed_version: &env.observed_version,
             platform: &env.platform,

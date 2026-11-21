@@ -6,7 +6,8 @@ use super::protocol_request::{post_protocol_request, PostProtocolRequestParams};
 use crate::attributes::bound_attributes;
 use crate::persistence::buffered_facts::BufferedFact;
 use crate::types::{
-    AdapterState, CheckInRequest, CheckInResponse, WireBufferedFact, PROTOCOL_VERSION,
+    AdapterState, BackendConnection, CheckInRequest, CheckInResponse, WireBufferedFact,
+    PROTOCOL_VERSION,
 };
 
 const CHECK_IN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -14,12 +15,8 @@ const CHECK_IN_TIMEOUT: Duration = Duration::from_secs(10);
 /// Parameters for one `send_check_in` call.
 #[derive(Debug)]
 pub struct CheckInParams<'a> {
-    /// The check-in endpoint's base URL.
-    pub base_url: &'a str,
-    /// Sent as a bearer token.
-    pub credential: &'a str,
-    /// Stable per-install identifier.
-    pub installation_id: &'a str,
+    /// Where this check-in is sent, and how it authenticates.
+    pub connection: BackendConnection<'a>,
     /// This SDK's own version.
     pub sdk_version: &'a str,
     /// The app version this installation is currently running.
@@ -48,7 +45,7 @@ pub async fn send_check_in(
 ) -> Option<CheckInResponse> {
     let body = CheckInRequest {
         protocol_version: PROTOCOL_VERSION,
-        installation_id: params.installation_id.to_string(),
+        installation_id: params.connection.installation_id.to_string(),
         event_id: Uuid::new_v4().to_string(),
         checked_in_at: now_iso8601(),
         sdk_version: params.sdk_version.to_string(),
@@ -68,9 +65,9 @@ pub async fn send_check_in(
     let parsed = post_protocol_request(
         client,
         PostProtocolRequestParams {
-            base_url: params.base_url,
+            base_url: params.connection.base_url,
             path: "/check-in",
-            credential: params.credential,
+            credential: params.connection.credential,
             timeout: CHECK_IN_TIMEOUT,
             operation: "check-in",
         },
