@@ -108,24 +108,12 @@ pub enum UpdateFailureMode {
     ManifestParseFailed,
     /// The update manifest's version is invalid.
     VersionInvalid,
-    /// The update manifest has no signature.
-    SignatureMissing,
     /// The update manifest's signature is invalid.
     SignatureInvalid,
     /// The update's signed version doesn't match the manifest.
     SignatureVersionMismatch,
-    /// The downloaded update failed its checksum check.
-    ChecksumMismatch,
     /// The update download failed at the network layer.
     DownloadTransportFailed,
-    /// The downloaded update file is invalid.
-    DownloadFileInvalid,
-    /// The update download exceeded its expected size.
-    DownloadSizeExceeded,
-    /// The update download stream ended early.
-    DownloadStreamIncomplete,
-    /// The differential update patch is incompatible.
-    DiffPatchIncompatible,
     /// The downloaded update could not be extracted.
     ExtractionFailed,
     /// The expected update target is missing from the manifest.
@@ -136,26 +124,10 @@ pub enum UpdateFailureMode {
     InstallWriteFailed,
     /// The update install needs or failed authorization.
     InstallAuthRequiredOrFailed,
-    /// The update was blocked as a version downgrade.
-    InstallDowngradeBlocked,
-    /// The app could not relaunch after installing the update.
-    InstallRelaunchFailed,
-    /// The downloaded update file is missing at install time.
-    InstallMissingUpdate,
     /// The updater's configuration is invalid.
     ConfigInvalid,
-    /// The update server's CORS headers are misconfigured.
-    CorsMisconfigured,
     /// This update isn't supported on the current platform.
     PlatformUnsupported,
-    /// macOS App Translocation blocked the update.
-    TranslocationBlocked,
-    /// The updater's WebKit process terminated unexpectedly.
-    WebkitTerminated,
-    /// The update's release notes could not be loaded.
-    ReleaseNotesFailed,
-    /// Resuming the update feed after a prior failure didn't work.
-    ResumeAppcastFailed,
     /// An unclassified update failure occurred.
     Unknown,
 }

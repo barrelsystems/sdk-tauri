@@ -174,4 +174,86 @@ mod tests {
         assert_eq!(mode, TempStorageConstraint);
         assert_eq!(phase, Phase::Extract);
     }
+
+    /// The real variant count of `tauri_plugin_updater::Error` at the
+    /// currently-pinned version (2.14.1): 32 variants compiled in on this
+    /// platform, plus `Extract` (only under `cfg(windows, feature = "zip")`).
+    const KNOWN_UPDATER_ERROR_VARIANT_COUNT: usize = 33;
+
+    #[test]
+    fn map_updater_error_handles_every_known_variant_explicitly() {
+        // One constructed instance per real variant, in `error.rs` source
+        // order -- constructing by name means a rename or removal fails to
+        // *compile*, not just to match, for every variant this enum still has.
+        let samples: Vec<UpdaterError> = vec![
+            UpdaterError::EmptyEndpoints,
+            UpdaterError::Io(std::io::Error::other("x")),
+            UpdaterError::Semver(semver::Version::parse("not-semver").unwrap_err()),
+            UpdaterError::Serialization(
+                serde_json::from_str::<serde_json::Value>("{").unwrap_err(),
+            ),
+            UpdaterError::ReleaseNotFound,
+            UpdaterError::UnsupportedArch,
+            UpdaterError::UnsupportedOs,
+            UpdaterError::FailedToDetermineExtractPath,
+            UpdaterError::UrlParse(url::Url::parse("not a url").unwrap_err()),
+            UpdaterError::TargetNotFound("x".to_string()),
+            UpdaterError::TargetsNotFound(vec!["x".to_string()]),
+            UpdaterError::Network("x".to_string()),
+            UpdaterError::Minisign(match minisign_verify::Signature::decode("not valid") {
+                Err(error) => error,
+                Ok(_) => panic!("expected an invalid minisign signature to fail decoding"),
+            }),
+            UpdaterError::Base64(
+                base64_for_updater_error_test::Engine::decode(
+                    &base64_for_updater_error_test::engine::general_purpose::STANDARD,
+                    "not valid!!",
+                )
+                .unwrap_err(),
+            ),
+            UpdaterError::SignatureUtf8("x".to_string()),
+            // `Extract` only exists under `cfg(windows, feature = "zip")`
+            // (not enabled here), so it can't be constructed -- it's covered
+            // by `map_updater_error`'s wildcard arm, counted but not sampled.
+            UpdaterError::TempDirNotOnSameMountPoint,
+            UpdaterError::PreviousAppNotRestored(std::path::PathBuf::from("/x")),
+            UpdaterError::BinaryNotFoundInArchive,
+            UpdaterError::TempDirNotFound,
+            UpdaterError::AuthenticationFailed,
+            UpdaterError::DebInstallFailed,
+            UpdaterError::PackageInstallFailed,
+            UpdaterError::InvalidUpdaterFormat,
+            UpdaterError::FormatDate,
+            UpdaterError::InsecureTransportProtocol,
+            UpdaterError::SignedVersionMismatch {
+                signed: "1.0.0".to_string(),
+                announced: "2.0.0".to_string(),
+            },
+            UpdaterError::MissingSignedVersion,
+            UpdaterError::Tauri(tauri::Error::AssetNotFound(String::new())),
+        ];
+
+        // `Extract` (cfg-gated) and the variants wrapping `reqwest::Error`,
+        // `http::Error`, `InvalidHeaderValue`, and `InvalidHeaderName` have
+        // no safe, version-stable constructor, so they're omitted above.
+        const UNSAMPLED_VARIANTS: usize = 5; // Extract, Reqwest, Http, InvalidHeaderValue, InvalidHeaderName.
+        assert_eq!(
+            samples.len() + UNSAMPLED_VARIANTS,
+            KNOWN_UPDATER_ERROR_VARIANT_COUNT,
+            "tauri_plugin_updater::Error's variant count has drifted -- \
+             re-audit map_updater_error's match arms and the dead \
+             UpdateFailureMode removal list before updating \
+             KNOWN_UPDATER_ERROR_VARIANT_COUNT."
+        );
+
+        for sample in &samples {
+            let (_, _, platform_code) = map_updater_error(sample);
+            assert_ne!(
+                platform_code, "unknown",
+                "a variant constructed in this test fell through to \
+                 map_updater_error's wildcard arm -- it needs its own match \
+                 arm"
+            );
+        }
+    }
 }

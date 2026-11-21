@@ -6,30 +6,16 @@ fn failure_mode_title(failure_mode: UpdateFailureMode) -> &'static str {
         ManifestUnreachable => "Could not reach the update manifest.",
         ManifestParseFailed => "The update manifest could not be parsed.",
         VersionInvalid => "The update manifest's version is invalid.",
-        SignatureMissing => "The update manifest has no signature.",
         SignatureInvalid => "The update manifest's signature is invalid.",
         SignatureVersionMismatch => "The update's signed version doesn't match the manifest.",
-        ChecksumMismatch => "The downloaded update failed its checksum check.",
         DownloadTransportFailed => "The update download failed at the network layer.",
-        DownloadFileInvalid => "The downloaded update file is invalid.",
-        DownloadSizeExceeded => "The update download exceeded its expected size.",
-        DownloadStreamIncomplete => "The update download stream ended early.",
-        DiffPatchIncompatible => "The differential update patch is incompatible.",
         ExtractionFailed => "The downloaded update could not be extracted.",
         TargetNotFoundInManifest => "The expected update target is missing from the manifest.",
         TempStorageConstraint => "A temporary-storage constraint blocked the update.",
         InstallWriteFailed => "The update could not be written to disk.",
         InstallAuthRequiredOrFailed => "The update install needs or failed authorization.",
-        InstallDowngradeBlocked => "The update was blocked as a version downgrade.",
-        InstallRelaunchFailed => "The app could not relaunch after installing the update.",
-        InstallMissingUpdate => "The downloaded update file is missing at install time.",
         ConfigInvalid => "The updater's configuration is invalid.",
-        CorsMisconfigured => "The update server's CORS headers are misconfigured.",
         PlatformUnsupported => "This update isn't supported on the current platform.",
-        TranslocationBlocked => "macOS App Translocation blocked the update.",
-        WebkitTerminated => "The updater's WebKit process terminated unexpectedly.",
-        ReleaseNotesFailed => "The update's release notes could not be loaded.",
-        ResumeAppcastFailed => "Resuming the update feed after a prior failure didn't work.",
         Unknown => "An unclassified update failure occurred.",
     }
 }
@@ -75,30 +61,16 @@ mod tests {
             ManifestUnreachable,
             ManifestParseFailed,
             VersionInvalid,
-            SignatureMissing,
             SignatureInvalid,
             SignatureVersionMismatch,
-            ChecksumMismatch,
             DownloadTransportFailed,
-            DownloadFileInvalid,
-            DownloadSizeExceeded,
-            DownloadStreamIncomplete,
-            DiffPatchIncompatible,
             ExtractionFailed,
             TargetNotFoundInManifest,
             TempStorageConstraint,
             InstallWriteFailed,
             InstallAuthRequiredOrFailed,
-            InstallDowngradeBlocked,
-            InstallRelaunchFailed,
-            InstallMissingUpdate,
             ConfigInvalid,
-            CorsMisconfigured,
             PlatformUnsupported,
-            TranslocationBlocked,
-            WebkitTerminated,
-            ReleaseNotesFailed,
-            ResumeAppcastFailed,
             Unknown,
         ] {
             assert!(!failure_mode_title(mode).is_empty());
@@ -128,21 +100,24 @@ mod tests {
     fn builds_a_failure_and_a_matching_failed_adapter_state_from_one_classification() {
         let (failure, state) = build_failure_state(
             "tauri-updater",
-            UpdateFailureMode::ChecksumMismatch,
+            UpdateFailureMode::DownloadTransportFailed,
             Phase::Download,
-            "checksum-mismatch",
+            "download-transport-failed",
         );
 
         assert_eq!(failure.phase, Phase::Download);
-        assert_eq!(failure.failure_mode, UpdateFailureMode::ChecksumMismatch);
+        assert_eq!(
+            failure.failure_mode,
+            UpdateFailureMode::DownloadTransportFailed
+        );
         assert_eq!(failure.platform, "tauri-updater");
-        assert_eq!(failure.platform_code, "checksum-mismatch");
+        assert_eq!(failure.platform_code, "download-transport-failed");
         assert_eq!(
             state,
             AdapterState::Failed {
                 category: FailureCategory::Download,
-                code: UpdateFailureMode::ChecksumMismatch,
-                platform_code: "checksum-mismatch".to_string(),
+                code: UpdateFailureMode::DownloadTransportFailed,
+                platform_code: "download-transport-failed".to_string(),
             }
         );
     }
