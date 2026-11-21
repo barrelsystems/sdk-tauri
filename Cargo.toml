@@ -38,6 +38,15 @@ tempfile = "3"
 # needing the `test-service` feature. Dev-dependency features never leak
 # into a real consumer's build.
 tauri = { version = "2", features = ["test"] }
+# Already in the dependency graph transitively via tauri-plugin-updater --
+# pulled in directly here only so error_map.rs's drift test can construct
+# real `tauri_plugin_updater::Error` variants. Dev-only, never shipped.
+semver = "1"
+url = "2"
+minisign-verify = "0.3"
+# tauri-plugin-updater pulls a newer `base64` (0.23) than this crate's own
+# runtime dependency (0.22) -- renamed so both can coexist, dev-only.
+base64-for-updater-error-test = { package = "base64", version = "0.23" }
 
 [features]
 # Never shipped -- isolates the test service's own dependencies (axum,

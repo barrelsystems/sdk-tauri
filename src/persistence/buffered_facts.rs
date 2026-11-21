@@ -301,7 +301,7 @@ mod tests {
     fn failed_state() -> AdapterState {
         AdapterState::Failed {
             category: FailureCategory::Download,
-            code: UpdateFailureMode::ChecksumMismatch,
+            code: UpdateFailureMode::Unknown,
             platform_code: "x".to_string(),
         }
     }
