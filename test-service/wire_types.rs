@@ -42,6 +42,28 @@ pub struct JitterFractionRequest {
 #[derive(Deserialize)]
 #[serde(tag = "command")]
 pub enum AdapterCommand {
+    #[serde(rename = "setBufferPersistence")]
+    SetBufferPersistence {
+        mode: tauri_plugin_barrel_kit::test_service::buffer_persistence_control::BufferPersistenceMode,
+    },
+    #[serde(rename = "getBufferPersistenceState")]
+    GetBufferPersistenceState,
+    #[serde(rename = "recordFacts")]
+    RecordFacts {
+        facts: Vec<tauri_plugin_barrel_kit::test_service::buffer_commands::FactObservation>,
+        concurrent: bool,
+    },
+    #[serde(rename = "getBufferedFacts")]
+    GetBufferedFacts,
+    #[serde(rename = "getPersistedBuffer")]
+    GetPersistedBuffer,
+    #[serde(rename = "clearBuffer")]
+    ClearBuffer,
+    #[serde(rename = "probeBufferExit")]
+    ProbeBufferExit {
+        mode: String,
+        facts: Vec<tauri_plugin_barrel_kit::test_service::buffer_commands::FactObservation>,
+    },
     #[serde(rename = "checkNow")]
     CheckNow,
     #[serde(rename = "getAdapterState")]

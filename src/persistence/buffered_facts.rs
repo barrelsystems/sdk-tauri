@@ -1,7 +1,8 @@
+use super::persistence_writer::PersistenceWriter;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Runtime};
-use tokio::sync::Mutex;
 
 use super::disk_store::DiskStore;
 use crate::types::{AdapterState, UpdateFailure};
@@ -15,11 +16,14 @@ fn is_terminal_adapter_state(state: &AdapterState) -> bool {
     )
 }
 
+// Snapshot clones retain identity; disk and wire payloads only carry fact values.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all_fields = "camelCase")]
 pub enum BufferedFact {
     #[serde(rename = "adapterState")]
     AdapterState {
+        #[serde(skip, default = "uuid::Uuid::new_v4")]
+        observation_id: uuid::Uuid,
         state: AdapterState,
         first_observed_at: String,
         last_observed_at: String,
@@ -27,6 +31,9 @@ pub enum BufferedFact {
     },
     #[serde(rename = "updateError")]
     UpdateError {
+        #[serde(skip, default = "uuid::Uuid::new_v4")]
+        observation_id: uuid::Uuid,
+        #[serde(with = "persisted_failure")]
         failure: UpdateFailure,
         first_observed_at: String,
         last_observed_at: String,
@@ -37,23 +44,15 @@ pub enum BufferedFact {
 impl BufferedFact {
     fn discriminant(&self) -> String {
         match self {
-            BufferedFact::UpdateError { failure, .. } => {
-                format!(
-                    "updateError:{:?}:{}",
-                    failure.failure_mode, failure.platform_code
+            BufferedFact::UpdateError { failure, .. } => format!(
+                "updateError:{:?}",
+                (
+                    failure.phase,
+                    failure.failure_mode,
+                    &failure.platform,
+                    &failure.platform_code
                 )
-            }
-            BufferedFact::AdapterState {
-                state:
-                    AdapterState::Failed {
-                        code,
-                        platform_code,
-                        ..
-                    },
-                ..
-            } => {
-                format!("adapterState:failed:{code:?}:{platform_code}")
-            }
+            ),
             BufferedFact::AdapterState { state, .. } => format!("adapterState:{state:?}"),
         }
     }
@@ -122,7 +121,8 @@ impl BufferedFact {
 
 pub struct BufferedFactsStore<R: Runtime> {
     buffer: Mutex<Vec<BufferedFact>>,
-    disk: DiskStore<R>,
+    disk: Arc<DiskStore<R>>,
+    writer: PersistenceWriter<R>,
     // Bound once via `configure()` and never changed afterward -- every
     // other method reads this instead of taking its own `path` argument.
     path: std::sync::OnceLock<PathBuf>,
@@ -130,9 +130,13 @@ pub struct BufferedFactsStore<R: Runtime> {
 
 impl<R: Runtime> BufferedFactsStore<R> {
     pub fn new(app: AppHandle<R>) -> Self {
+        let disk = Arc::new(DiskStore::new(app));
+        let writer = PersistenceWriter::new(disk.clone());
+
         Self {
             buffer: Mutex::new(Vec::new()),
-            disk: DiskStore::new(app),
+            disk,
+            writer,
             path: std::sync::OnceLock::new(),
         }
     }
@@ -148,13 +152,19 @@ impl<R: Runtime> BufferedFactsStore<R> {
         let Ok(facts) = serde_json::from_value::<Vec<BufferedFact>>(value) else {
             return;
         };
-        *self.buffer.lock().await = facts;
+        *self
+            .buffer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = facts;
     }
 
     /// A snapshot of the current facts, for inclusion in a check-in
     /// request. Never the live buffer.
     pub async fn snapshot(&self) -> Vec<BufferedFact> {
-        self.buffer.lock().await.clone()
+        self.buffer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// Clears exactly the facts in `sent` (a snapshot `snapshot()` returned
@@ -163,14 +173,18 @@ impl<R: Runtime> BufferedFactsStore<R> {
     ///
     /// A fact recorded after `sent` was taken must survive this call.
     pub async fn clear(&self, sent: &[BufferedFact]) {
-        let mut buffer = self.buffer.lock().await;
+        let mut buffer = self
+            .buffer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         buffer.retain(|fact| !sent.contains(fact));
-        self.persist_locked(&buffer).await;
+        self.persist_locked(&buffer);
     }
 
     pub async fn record_adapter_state(&self, state: AdapterState) {
         let now = now_iso8601();
         self.upsert(BufferedFact::AdapterState {
+            observation_id: uuid::Uuid::new_v4(),
             state,
             first_observed_at: now.clone(),
             last_observed_at: now,
@@ -182,6 +196,7 @@ impl<R: Runtime> BufferedFactsStore<R> {
     pub async fn record_update_error(&self, failure: UpdateFailure) {
         let now = now_iso8601();
         self.upsert(BufferedFact::UpdateError {
+            observation_id: uuid::Uuid::new_v4(),
             failure,
             first_observed_at: now.clone(),
             last_observed_at: now,
@@ -197,11 +212,9 @@ impl<R: Runtime> BufferedFactsStore<R> {
     /// A full `UpdateError` already carries its own `title`, resolved at
     /// the time it was recorded, so no further lookup is needed here.
     ///
-    /// `None` if nothing's buffered, or if the buffer happens to be locked
-    /// by a concurrent async write at this exact synchronous-call instant
-    /// -- fail-open, same posture as every other read here.
+    /// The memory lock is never held across disk I/O.
     pub fn latest_update_error(&self) -> Option<UpdateFailure> {
-        let buffer = self.buffer.try_lock().ok()?;
+        let buffer = self.buffer.lock().ok()?;
         buffer
             .iter()
             .filter_map(|fact| match fact {
@@ -217,16 +230,20 @@ impl<R: Runtime> BufferedFactsStore<R> {
     }
 
     async fn upsert(&self, candidate: BufferedFact) {
-        let mut buffer = self.buffer.lock().await;
+        let mut buffer = self
+            .buffer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let discriminant = candidate.discriminant();
 
-        if let Some(existing_index) = buffer
-            .iter()
-            .position(|fact| fact.discriminant() == discriminant)
+        if let Some(existing) = buffer
+            .last()
+            .filter(|fact| fact.discriminant() == discriminant)
         {
-            let merged = candidate.with_merge(&buffer[existing_index]);
+            let merged = candidate.with_merge(existing);
+            let existing_index = buffer.len() - 1;
             buffer[existing_index] = merged;
-            self.persist_locked(&buffer).await;
+            self.persist_locked(&buffer);
             return;
         }
 
@@ -243,32 +260,30 @@ impl<R: Runtime> BufferedFactsStore<R> {
         }
 
         buffer.push(candidate);
-        self.persist_locked(&buffer).await;
+        self.persist_locked(&buffer);
     }
 
-    async fn persist_locked(&self, buffer: &[BufferedFact]) {
+    fn persist_locked(&self, buffer: &[BufferedFact]) {
         let Some(path) = self.path.get() else { return };
         let Ok(value) = serde_json::to_value(buffer) else {
             return;
         };
-        self.disk.write(path, "facts", value).await;
+        self.writer.persist(path, "facts", value);
     }
 
-    /// The reserved synchronous path for process exit (`RunEvent::Exit`),
-    /// which can't `.await`.
-    ///
-    /// Best-effort: if the buffer is locked by an in-flight async write at
-    /// this exact instant, this silently skips -- fail-open, same posture
-    /// as every other persistence path here.
+    /// Waits only at explicit durability boundaries, never while holding buffer state.
+    pub async fn wait_for_pending_writes(&self) {
+        self.writer.wait_for_pending_writes().await;
+    }
+
+    /// Serializes exit with any running writer and persists the latest snapshot.
     pub fn flush_sync(&self) {
-        let Some(path) = self.path.get() else { return };
-        let Ok(buffer) = self.buffer.try_lock() else {
-            return;
-        };
-        let Ok(value) = serde_json::to_value(&*buffer) else {
-            return;
-        };
-        self.disk.write_sync(path, "facts", value);
+        let buffer = self
+            .buffer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.persist_locked(&buffer);
+        self.writer.flush_sync();
     }
 }
 
@@ -317,6 +332,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failure_titles_are_derived_after_reload_and_never_persisted() {
+        let app = mock_app();
+        let store = BufferedFactsStore::new(app.handle().clone());
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("facts.json");
+        store.configure(&path).await;
+        store.record_update_error(update_error("persisted")).await;
+        store.wait_for_pending_writes().await;
+        let disk: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(disk["facts"][0]["failure"].get("title").is_none());
+        store.wait_for_pending_writes().await;
+        let second_app = mock_app();
+        let second = BufferedFactsStore::new(second_app.handle().clone());
+        second.configure(&path).await;
+        let failure = second.latest_update_error().unwrap();
+        assert_eq!(failure.platform_code, "persisted");
+        assert_eq!(failure.title, "An unclassified update failure occurred.");
+    }
+
+    #[tokio::test]
     async fn merges_a_repeated_fact_instead_of_duplicating_it() {
         let app = mock_app();
         let store = BufferedFactsStore::new(app.handle().clone());
@@ -353,6 +389,58 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    fn fixed_fact(state: AdapterState) -> BufferedFact {
+        BufferedFact::AdapterState {
+            observation_id: uuid::Uuid::new_v4(),
+            state,
+            first_observed_at: "2026-01-01T00:00:00.000Z".into(),
+            last_observed_at: "2026-01-01T00:00:00.000Z".into(),
+            occurrence_count: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn acknowledgment_preserves_an_unsent_equal_valued_observation() {
+        let app = mock_app();
+        let store = BufferedFactsStore::new(app.handle().clone());
+        store.upsert(fixed_fact(AdapterState::Checking)).await;
+        let sent = store.snapshot().await;
+        store.upsert(fixed_fact(AdapterState::Downloaded)).await;
+        store.upsert(fixed_fact(AdapterState::Checking)).await;
+        let before = store.snapshot().await;
+        assert_eq!(
+            serde_json::to_value(&before[0]).unwrap(),
+            serde_json::to_value(&before[2]).unwrap()
+        );
+
+        store.clear(&sent).await;
+        let remaining = store.snapshot().await;
+        assert_eq!(remaining, before[1..]);
+
+        store.clear(&sent).await;
+        assert_eq!(store.snapshot().await, remaining);
+    }
+
+    #[tokio::test]
+    async fn acknowledgment_cannot_clear_an_equal_replacement_after_eviction() {
+        let app = mock_app();
+        let store = BufferedFactsStore::new(app.handle().clone());
+        store.upsert(fixed_fact(AdapterState::Checking)).await;
+        let sent = store.snapshot().await;
+        for progress in 0..32 {
+            store
+                .upsert(fixed_fact(AdapterState::Downloading {
+                    progress: Some(progress),
+                }))
+                .await;
+        }
+        store.upsert(fixed_fact(AdapterState::Checking)).await;
+        let before = store.snapshot().await;
+
+        store.clear(&sent).await;
+        assert_eq!(store.snapshot().await, before);
     }
 
     #[tokio::test]
@@ -402,6 +490,8 @@ mod tests {
         first.configure(&path).await;
         first.record_update_error(update_error("first")).await;
 
+        first.wait_for_pending_writes().await;
+
         // A separate mock app -- its own `AppHandle` and resource table,
         // so this can only pass by genuinely reading `path` back.
         let second_app = mock_app();
@@ -411,5 +501,45 @@ mod tests {
         let snapshot = second.snapshot().await;
         assert_eq!(snapshot.len(), 1);
         assert_eq!(second.latest_update_error().unwrap().platform_code, "first");
+    }
+}
+
+mod persisted_failure {
+    use crate::types::{Phase, UpdateFailure, UpdateFailureMode};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct StoredFailure {
+        phase: Phase,
+        failure_mode: UpdateFailureMode,
+        platform: String,
+        platform_code: String,
+    }
+
+    pub fn serialize<S: Serializer>(
+        failure: &UpdateFailure,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        StoredFailure {
+            phase: failure.phase,
+            failure_mode: failure.failure_mode,
+            platform: failure.platform.clone(),
+            platform_code: failure.platform_code.clone(),
+        }
+        .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<UpdateFailure, D::Error> {
+        let stored = StoredFailure::deserialize(deserializer)?;
+        Ok(crate::error_taxonomy::build_failure_state(
+            &stored.platform,
+            stored.failure_mode,
+            stored.phase,
+            &stored.platform_code,
+        )
+        .0)
     }
 }

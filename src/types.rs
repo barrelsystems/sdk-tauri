@@ -222,6 +222,7 @@ impl From<&BufferedFact> for WireBufferedFact {
                 first_observed_at,
                 last_observed_at,
                 occurrence_count,
+                ..
             } => WireBufferedFact::AdapterState {
                 state: state.clone(),
                 first_observed_at: first_observed_at.clone(),
@@ -233,6 +234,7 @@ impl From<&BufferedFact> for WireBufferedFact {
                 first_observed_at,
                 last_observed_at,
                 occurrence_count,
+                ..
             } => WireBufferedFact::UpdateError {
                 phase: failure.phase,
                 failure_mode: failure.failure_mode,

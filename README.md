@@ -98,3 +98,5 @@ for the wire protocol, `reqwest` with `rustls-tls`, `tokio` (already a
 for installation IDs. `url` comes in free via `tauri-plugin-updater`'s own
 tree. Everything here ships inside your binary, so we keep this list short
 on purpose.
+
+Source ownership is described in [Architecture](docs/architecture.md).

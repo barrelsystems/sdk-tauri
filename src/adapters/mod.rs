@@ -91,7 +91,7 @@ impl Adapter {
         facts: &BufferedFactsStore<R>,
     ) {
         #[cfg(feature = "test-service")]
-        crate::test_service::record_check();
+        crate::test_service::runtime::record_check();
 
         self.set_state(facts, AdapterState::Checking).await;
 
@@ -138,7 +138,7 @@ impl Adapter {
         let Some(update) = pending.take() else { return };
 
         #[cfg(feature = "test-service")]
-        crate::test_service::record_download();
+        crate::test_service::runtime::record_download();
 
         self.set_state(facts, AdapterState::Downloading { progress: None })
             .await;
@@ -198,7 +198,7 @@ impl Adapter {
         };
 
         #[cfg(feature = "test-service")]
-        if crate::test_service::intercept_install() {
+        if crate::test_service::runtime::intercept_install() {
             return;
         }
 
