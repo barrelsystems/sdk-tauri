@@ -64,6 +64,9 @@ impl UpdateFeed {
                     }
                     Err(error) => panic!("test feed: {error}"),
                 };
+                // Accepted sockets can inherit the listener's nonblocking
+                // mode; read the complete request before choosing a response.
+                socket.set_nonblocking(false).unwrap();
                 socket
                     .set_read_timeout(Some(Duration::from_secs(3)))
                     .unwrap();
