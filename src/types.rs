@@ -128,6 +128,8 @@ pub enum UpdateFailureMode {
     ConfigInvalid,
     /// This update isn't supported on the current platform.
     PlatformUnsupported,
+    /// The app quit to apply an update, but never came back up on the new version.
+    ApplyNotConfirmed,
     /// An unclassified update failure occurred.
     Unknown,
 }

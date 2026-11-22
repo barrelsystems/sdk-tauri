@@ -32,6 +32,7 @@ use host_control::HostControl;
 use persistence::buffered_facts::BufferedFactsStore;
 use persistence::installation_id::InstallationIdStore;
 use persistence::key_rotation::TrustedKeyStore;
+use persistence::version_expectation::VersionExpectationStore;
 
 pub use errors::BarrelConfigError;
 /// Bundles `base_url`/`credential`/`installation_id` for the protocol
@@ -93,7 +94,13 @@ pub fn apply_update<R: Runtime>(app: &AppHandle<R>) {
         let ctx = shared.action_context(&base_url, &trusted_key_pem);
         shared
             .host_control
-            .apply_update(&ctx, &shared.adapter, &shared.facts)
+            .apply_update(
+                &ctx,
+                &shared.adapter,
+                &shared.facts,
+                &shared.version_expectations,
+                &shared.version_expectation_path,
+            )
             .await;
     });
 }
@@ -203,6 +210,33 @@ fn validate_hold_cache_max_age(
     Ok(())
 }
 
+/// Resolves what the previous session's apply attempt, if any,
+/// expected to be running by now against what's actually running, then
+/// clears the marker either way so this only ever fires once per attempt.
+async fn check_version_expectation<R: Runtime>(
+    app: &AppHandle<R>,
+    facts: &BufferedFactsStore<R>,
+    version_expectations: &VersionExpectationStore<R>,
+    path: &std::path::Path,
+) {
+    let Some(expected_version) = version_expectations.read(path).await else {
+        return;
+    };
+
+    let running_version = app.package_info().version.to_string();
+    if expected_version != running_version {
+        let (failure, _) = error_taxonomy::build_failure_state(
+            "version-check",
+            types::UpdateFailureMode::ApplyNotConfirmed,
+            types::Phase::Install,
+            &format!("expected {expected_version}, running {running_version}"),
+        );
+        facts.record_update_error(failure).await;
+    }
+
+    version_expectations.clear(path).await;
+}
+
 async fn bootstrap<R: Runtime>(app: AppHandle<R>, config: InitConfig) {
     // A second `barrel_kit()` call must be a silent no-op, never a second
     // `Adapter`/cadence loop double-driving the native updater --
@@ -227,6 +261,7 @@ async fn bootstrap<R: Runtime>(app: AppHandle<R>, config: InitConfig) {
     let installation_id_path = data_dir.join("barrel-installation.json");
     let facts_path = data_dir.join("barrel-buffered-facts.json");
     let trusted_key_path = data_dir.join("barrel-trusted-key.json");
+    let version_expectation_path = data_dir.join("barrel-version-expectation.json");
 
     let installation_ids = InstallationIdStore::new(app.clone());
     let installation_id = installation_ids.get_or_create(&installation_id_path).await;
@@ -238,6 +273,15 @@ async fn bootstrap<R: Runtime>(app: AppHandle<R>, config: InitConfig) {
     trusted_keys
         .get_or_create(&trusted_key_path, keys::PUBLIC_ED25519_KEY_PEM)
         .await;
+
+    let version_expectations = VersionExpectationStore::new(app.clone());
+    check_version_expectation(
+        &app,
+        &facts,
+        &version_expectations,
+        &version_expectation_path,
+    )
+    .await;
 
     let client = reqwest::Client::new();
 
@@ -253,6 +297,8 @@ async fn bootstrap<R: Runtime>(app: AppHandle<R>, config: InitConfig) {
         facts,
         trusted_keys,
         trusted_key_path,
+        version_expectations,
+        version_expectation_path,
         host_control: HostControl::new(),
         installation_id,
         config,
@@ -301,5 +347,45 @@ mod tests {
     #[test]
     fn a_hold_cache_max_age_above_seven_days_is_rejected() {
         assert!(validate_hold_cache_max_age(Some(MAX_HOLD_CACHE_MAX_AGE_MS + 1)).is_err());
+    }
+
+    fn unused_temp_path() -> std::path::PathBuf {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let path = file.path().to_path_buf();
+        std::fs::remove_file(&path).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn check_version_expectation_clears_the_marker_silently_on_a_match() {
+        let app = persistence::test_support::mock_app();
+        let running_version = app.package_info().version.to_string();
+        let facts = BufferedFactsStore::new(app.handle().clone());
+        let version_expectations = VersionExpectationStore::new(app.handle().clone());
+        let path = unused_temp_path();
+        version_expectations.set(&path, &running_version).await;
+
+        check_version_expectation(app.handle(), &facts, &version_expectations, &path).await;
+
+        assert_eq!(version_expectations.read(&path).await, None);
+        assert!(facts.snapshot().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn check_version_expectation_records_apply_not_confirmed_on_a_mismatch() {
+        let app = persistence::test_support::mock_app();
+        let running_version = app.package_info().version.to_string();
+        let facts = BufferedFactsStore::new(app.handle().clone());
+        let version_expectations = VersionExpectationStore::new(app.handle().clone());
+        let path = unused_temp_path();
+        version_expectations
+            .set(&path, &format!("{running_version}-not-running"))
+            .await;
+
+        check_version_expectation(app.handle(), &facts, &version_expectations, &path).await;
+
+        assert_eq!(version_expectations.read(&path).await, None);
+        let snapshot = facts.snapshot().await;
+        assert_eq!(snapshot.len(), 1);
     }
 }
