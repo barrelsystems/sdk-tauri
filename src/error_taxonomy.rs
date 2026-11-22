@@ -16,6 +16,9 @@ fn failure_mode_title(failure_mode: UpdateFailureMode) -> &'static str {
         InstallAuthRequiredOrFailed => "The update install needs or failed authorization.",
         ConfigInvalid => "The updater's configuration is invalid.",
         PlatformUnsupported => "This update isn't supported on the current platform.",
+        ApplyNotConfirmed => {
+            "The app quit to apply an update, but never came back up on the new version."
+        }
         Unknown => "An unclassified update failure occurred.",
     }
 }
@@ -71,6 +74,7 @@ mod tests {
             InstallAuthRequiredOrFailed,
             ConfigInvalid,
             PlatformUnsupported,
+            ApplyNotConfirmed,
             Unknown,
         ] {
             assert!(!failure_mode_title(mode).is_empty());

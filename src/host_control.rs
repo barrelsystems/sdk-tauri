@@ -1,8 +1,10 @@
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Runtime;
 
 use crate::adapters::Adapter;
 use crate::persistence::buffered_facts::BufferedFactsStore;
+use crate::persistence::version_expectation::VersionExpectationStore;
 use crate::protocol::pre_action_check::{check_pre_action, PreActionCheckParams, Stage};
 use crate::types::{AdapterState, BackendConnection, Policy};
 
@@ -88,27 +90,39 @@ impl HostControl {
     /// Host-triggered earlier apply, ahead of the natural-quit default. A
     /// no-op, not an error, before anything has actually downloaded --
     /// there's nothing yet to apply.
+    #[allow(clippy::too_many_arguments)]
     pub async fn apply_update<R: Runtime>(
         &self,
         ctx: &ActionContext<'_>,
         adapter: &Adapter,
         facts: &BufferedFactsStore<R>,
+        version_expectations: &VersionExpectationStore<R>,
+        version_expectation_path: &Path,
     ) {
         if adapter.state() != AdapterState::Downloaded {
             return;
         }
 
         if can_proceed(ctx, Stage::PreApply).await {
+            // Awaited, not fire-and-forget: a successful Windows install
+            // can exit the process immediately once `quit_and_install`
+            // returns, so this must land on disk before that call starts.
+            if let Some(version) = adapter.target_version().await {
+                version_expectations
+                    .set(version_expectation_path, &version)
+                    .await;
+            }
+
             adapter.quit_and_install(facts).await;
 
             // A failed install leaves the adapter in `Failed`, not stuck
-            // at `Downloaded`.
-
-            // Clearing the flag here is what stops `RunEvent::ExitRequested`
-            // from retrying the same failing install forever on every
-            // subsequent exit attempt.
+            // at `Downloaded`. This path already classified and recorded
+            // the real failure, so the marker is cleared here too --
+            // otherwise the next startup's version check would report a
+            // second, redundant failure for the same already-reported one.
             if matches!(adapter.state(), AdapterState::Failed { .. }) {
                 self.pending_install.store(false, Ordering::SeqCst);
+                version_expectations.clear(version_expectation_path).await;
             }
         }
     }
@@ -163,9 +177,17 @@ mod tests {
         let adapter = Adapter::new();
         let app = mock_app();
         let facts = BufferedFactsStore::new(app.handle().clone());
+        let version_expectations = VersionExpectationStore::new(app.handle().clone());
+        let version_expectation_path = std::env::temp_dir().join("unused-version-expectation.json");
 
         host_control
-            .apply_update(&unreachable_ctx(), &adapter, &facts)
+            .apply_update(
+                &unreachable_ctx(),
+                &adapter,
+                &facts,
+                &version_expectations,
+                &version_expectation_path,
+            )
             .await;
 
         // No panic and no state change is the whole assertion -- there's

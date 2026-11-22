@@ -7,7 +7,10 @@ pub fn map_updater_error(error: &UpdaterError) -> (UpdateFailureMode, Phase, &'s
     use UpdateFailureMode::*;
     match error {
         UpdaterError::EmptyEndpoints => (ManifestUnreachable, Phase::Check, "EmptyEndpoints"),
-        UpdaterError::Io(_) => (DownloadTransportFailed, Phase::Download, "Io"),
+        // Every real construction site is installer-launch, package-manager
+        // exec, privilege escalation, or Windows extract-to-temp-dir work --
+        // never the real `download()` function, which only produces reqwest errors.
+        UpdaterError::Io(_) => (InstallWriteFailed, Phase::Install, "Io"),
         UpdaterError::Semver(_) => (VersionInvalid, Phase::Check, "Semver"),
         UpdaterError::Serialization(_) => (ManifestParseFailed, Phase::Check, "Serialization"),
         UpdaterError::ReleaseNotFound => (ManifestUnreachable, Phase::Check, "ReleaseNotFound"),
@@ -105,6 +108,13 @@ mod tests {
         let (mode, phase, _) = map_updater_error(&UpdaterError::Network("x".to_string()));
         assert_eq!(mode, DownloadTransportFailed);
         assert_eq!(phase, Phase::Download);
+    }
+
+    #[test]
+    fn an_io_error_classifies_as_install_write_failed_not_download() {
+        let (mode, phase, _) = map_updater_error(&UpdaterError::Io(std::io::Error::other("x")));
+        assert_eq!(mode, InstallWriteFailed);
+        assert_eq!(phase, Phase::Install);
     }
 
     #[test]

@@ -10,6 +10,7 @@ use crate::host_control::{ActionContext, HostControl};
 use crate::jitter::compute_jitter_fraction;
 use crate::persistence::buffered_facts::{BufferedFact, BufferedFactsStore};
 use crate::persistence::key_rotation::TrustedKeyStore;
+use crate::persistence::version_expectation::VersionExpectationStore;
 use crate::protocol::check_in::{
     now_epoch_millis, parse_iso8601_to_epoch_millis, send_check_in, CheckInParams,
 };
@@ -27,6 +28,8 @@ pub struct CadenceShared<R: Runtime> {
     pub facts: BufferedFactsStore<R>,
     pub trusted_keys: TrustedKeyStore<R>,
     pub trusted_key_path: std::path::PathBuf,
+    pub version_expectations: VersionExpectationStore<R>,
+    pub version_expectation_path: std::path::PathBuf,
     pub host_control: HostControl,
     pub installation_id: String,
     pub config: InitConfig,

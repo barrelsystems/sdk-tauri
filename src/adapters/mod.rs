@@ -61,6 +61,16 @@ impl Adapter {
         self.last_error.lock().unwrap().clone()
     }
 
+    /// The version currently available/downloaded, if any -- `None` before
+    /// `check_for_updates` has ever found one.
+    pub async fn target_version(&self) -> Option<String> {
+        self.pending_update
+            .lock()
+            .await
+            .as_ref()
+            .map(|update| update.version.clone())
+    }
+
     async fn set_state<R: Runtime>(&self, facts: &BufferedFactsStore<R>, state: AdapterState) {
         *self.state.lock().unwrap() = state.clone();
         let _ = self.state_tx.send(state.clone());
