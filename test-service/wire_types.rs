@@ -46,6 +46,8 @@ pub enum AdapterCommand {
     CheckNow,
     #[serde(rename = "getAdapterState")]
     GetAdapterState,
+    #[serde(rename = "getPolicy")]
+    GetPolicy,
     #[serde(rename = "getLastUpdateError")]
     GetLastUpdateError,
     #[serde(rename = "injectEvent")]
@@ -55,8 +57,12 @@ pub enum AdapterCommand {
         #[allow(dead_code)]
         payload: Option<serde_json::Value>,
     },
-    #[serde(rename = "triggerPreActionCheck")]
-    TriggerPreActionCheck { stage: String },
+    #[serde(rename = "getUpdaterActivity")]
+    GetUpdaterActivity,
+    #[serde(rename = "prepareAction")]
+    PrepareAction { stage: String },
+    #[serde(rename = "runAction")]
+    RunAction { stage: String },
 }
 
 /// Every command's own result shape differs, so this is generic over

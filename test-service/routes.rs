@@ -19,6 +19,7 @@ use crate::WORKER_ENV_VAR;
 struct ChildAdapter {
     child: tokio::process::Child,
     port: u16,
+    directory: std::path::PathBuf,
 }
 
 type Adapters = std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<String, ChildAdapter>>>;
@@ -97,7 +98,10 @@ async fn create_adapter(
 
     // The check-in `baseUrl`/`publicKeyPem` every adapter now always
     // carries are passed through here unchanged, regardless of `variant`.
+    let directory =
+        std::env::temp_dir().join(format!("barrel-tauri-runtime-{}", uuid::Uuid::new_v4()));
     let config_json = serde_json::json!({
+        "directory": directory,
         "mockResponse": mock_response,
         "checkInBaseUrl": payload.check_in_base_url,
         "publicKeyPem": payload.public_key_pem,
@@ -109,6 +113,7 @@ async fn create_adapter(
     let mut child = match tokio::process::Command::new(exe)
         .env(WORKER_ENV_VAR, &config_json)
         .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
     {
         Ok(child) => child,
@@ -128,6 +133,7 @@ async fn create_adapter(
             Ok(port) => port,
             Err(_) => {
                 let _ = child.kill().await;
+                let _ = tokio::fs::remove_dir_all(&directory).await;
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("worker printed a non-port line: {line:?}"),
@@ -137,6 +143,7 @@ async fn create_adapter(
         },
         _ => {
             let _ = child.kill().await;
+            let _ = tokio::fs::remove_dir_all(&directory).await;
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "worker never printed its port",
@@ -146,11 +153,14 @@ async fn create_adapter(
     };
 
     let id = uuid::Uuid::new_v4().to_string();
-    state
-        .adapters
-        .lock()
-        .await
-        .insert(id.clone(), ChildAdapter { child, port });
+    state.adapters.lock().await.insert(
+        id.clone(),
+        ChildAdapter {
+            child,
+            port,
+            directory,
+        },
+    );
 
     Json(CreateAdapterResponse { id }).into_response()
 }
@@ -198,6 +208,7 @@ async fn run_command(
 async fn destroy_adapter(State(state): State<RoutesState>, Path(id): Path<String>) -> Response {
     if let Some(mut adapter) = state.adapters.lock().await.remove(&id) {
         let _ = adapter.child.kill().await;
+        let _ = tokio::fs::remove_dir_all(adapter.directory).await;
     }
     // The endpoint declares no success schema, so the client expects
     // 204, not 200 -- confirmed against a real HttpApiClient decode error.

@@ -21,6 +21,9 @@ mod persistence;
 pub mod protocol;
 #[cfg(not(feature = "test-service"))]
 mod protocol;
+/// Conformance-only environment and native updater observations.
+#[cfg(feature = "test-service")]
+pub mod test_service;
 mod types;
 
 use std::sync::{Arc, Mutex, OnceLock};
@@ -88,38 +91,41 @@ pub fn apply_update<R: Runtime>(app: &AppHandle<R>) {
     let Some(shared) = shared_for::<R>(app) else {
         return;
     };
-    tauri::async_runtime::spawn(async move {
-        let (base_url, trusted_key_pem) =
-            cadence::resolve_connection_fields(&shared.config, &shared.trusted_keys).await;
-        let ctx = shared.action_context(&base_url, &trusted_key_pem);
-        shared
-            .host_control
-            .apply_update(
-                &ctx,
-                &shared.adapter,
-                &shared.facts,
-                &shared.version_expectations,
-                &shared.version_expectation_path,
-            )
-            .await;
-    });
+    tauri::async_runtime::spawn(perform_apply(shared));
 }
 
-/// Host-triggered earlier download, for a host that set `auto_download:
-/// false` and otherwise had no way to ever complete an update.
+async fn perform_apply<R: Runtime>(shared: Arc<CadenceShared<R>>) {
+    let (base_url, trusted_key_pem) =
+        cadence::resolve_connection_fields(&shared.config, &shared.trusted_keys).await;
+    let ctx = shared.action_context(&base_url, &trusted_key_pem);
+    shared
+        .host_control
+        .apply_update(
+            &ctx,
+            &shared.adapter,
+            &shared.facts,
+            &shared.version_expectations,
+            &shared.version_expectation_path,
+        )
+        .await;
+}
+
+/// Host-triggered download when automatic downloads are disabled.
 pub fn download_update<R: Runtime>(app: &AppHandle<R>) {
     let Some(shared) = shared_for::<R>(app) else {
         return;
     };
-    tauri::async_runtime::spawn(async move {
-        let (base_url, trusted_key_pem) =
-            cadence::resolve_connection_fields(&shared.config, &shared.trusted_keys).await;
-        let ctx = shared.action_context(&base_url, &trusted_key_pem);
-        shared
-            .host_control
-            .download_update(&ctx, &shared.adapter, &shared.facts)
-            .await;
-    });
+    tauri::async_runtime::spawn(perform_download(shared));
+}
+
+async fn perform_download<R: Runtime>(shared: Arc<CadenceShared<R>>) {
+    let (base_url, trusted_key_pem) =
+        cadence::resolve_connection_fields(&shared.config, &shared.trusted_keys).await;
+    let ctx = shared.action_context(&base_url, &trusted_key_pem);
+    shared
+        .host_control
+        .download_update(&ctx, &shared.adapter, &shared.facts)
+        .await;
 }
 
 fn shared_for<R: Runtime>(_app: &AppHandle<R>) -> Option<Arc<CadenceShared<R>>> {
@@ -258,6 +264,9 @@ async fn bootstrap<R: Runtime>(app: AppHandle<R>, config: InitConfig) {
         .path()
         .app_data_dir()
         .expect("Barrel: could not resolve this app's data directory");
+    #[cfg(feature = "test-service")]
+    let data_dir = test_service::directory().unwrap_or(data_dir);
+
     let installation_id_path = data_dir.join("barrel-installation.json");
     let facts_path = data_dir.join("barrel-buffered-facts.json");
     let trusted_key_path = data_dir.join("barrel-trusted-key.json");
