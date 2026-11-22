@@ -55,6 +55,9 @@ install, plus on window focus. Every Policy response is verified with
 `ed25519-dalek`; a failed verification just keeps the last good Policy
 around instead of erroring out.
 
+Every check-in reports `InitConfig.channel` verbatim (default: `"stable"`),
+without changing the updater's feed.
+
 Facts recorded while offline get buffered to disk and flushed on the next
 successful check-in. Repeats get merged rather than duplicated, and if the
 buffer fills up, the oldest non-terminal entry gets dropped first. Downloads
@@ -83,9 +86,8 @@ set `debug: true`, in which case it goes to `eprintln!`.
 
 ## What stays yours
 
-Channels, targeting, and rollout live on Barrel's dashboard, not in this
-crate. The feed itself and whatever binaries it serves are entirely yours;
-`update_feed_url` just points at them.
+Targeting and rollout live on Barrel's dashboard. The feed itself and
+whatever binaries it serves are yours; `update_feed_url` just points at them.
 
 ## Dependencies
 

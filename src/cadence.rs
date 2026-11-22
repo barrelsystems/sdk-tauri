@@ -173,6 +173,7 @@ async fn tick<R: Runtime>(shared: &Arc<CadenceShared<R>>) {
                 installation_id: &shared.installation_id,
             },
             sdk_version: &shared.sdk_version,
+            channel: shared.config.channel.as_deref().unwrap_or("stable"),
             observed_version: &env.observed_version,
             platform: &env.platform,
             arch: &env.arch,

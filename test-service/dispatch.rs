@@ -310,6 +310,7 @@ async fn check_now(check_in: &CheckInState) -> Response {
         CheckInParams {
             connection: check_in.connection(),
             sdk_version: env!("CARGO_PKG_VERSION"),
+            channel: "stable",
             observed_version: env!("CARGO_PKG_VERSION"),
             platform: "test",
             arch: "test",
