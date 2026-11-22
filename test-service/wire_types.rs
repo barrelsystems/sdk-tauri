@@ -15,6 +15,7 @@ pub struct Capabilities {
 
 #[derive(Deserialize)]
 pub struct CreateAdapterRequest {
+    pub channel: Option<String>,
     #[serde(rename = "checkInBaseUrl")]
     pub check_in_base_url: String,
     #[serde(rename = "publicKeyPem")]

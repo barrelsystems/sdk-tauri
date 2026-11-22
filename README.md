@@ -55,8 +55,9 @@ install, plus on window focus. Every Policy response is verified with
 `ed25519-dalek`; a failed verification just keeps the last good Policy
 around instead of erroring out.
 
-Every check-in reports `InitConfig.channel` verbatim (default: `"stable"`),
-without changing the updater's feed.
+Every check-in reports the channel key in `InitConfig.channel` verbatim
+(default: `"stable"`), without changing the updater's feed. Keys are
+case-sensitive; use the configured key rather than its display name.
 
 Facts recorded while offline get buffered to disk and flushed on the next
 successful check-in. Repeats get merged rather than duplicated, and if the

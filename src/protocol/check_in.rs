@@ -188,6 +188,7 @@ mod tests {
                 socket
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
+
                 let mut request = Vec::new();
                 let mut bytes = [0; 4096];
 
@@ -215,6 +216,7 @@ mod tests {
                 )
                 .unwrap();
             });
+
             let response = send_check_in(
                 &reqwest::Client::new(),
                 CheckInParams {
@@ -236,6 +238,7 @@ mod tests {
                 &|_| {},
             )
             .await;
+
             assert!(response.is_some());
             server.join().unwrap();
         }

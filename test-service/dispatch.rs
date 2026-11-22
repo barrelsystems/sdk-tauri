@@ -32,6 +32,7 @@ use crate::wire_types::{AdapterCommand, ResultWrapper};
 /// always carries, regardless of whether a `variant` was also given.
 #[derive(Deserialize)]
 struct WorkerConfig {
+    channel: Option<String>,
     #[serde(rename = "mockResponse")]
     mock_response: MockResponse,
     #[serde(rename = "checkInBaseUrl")]
@@ -55,6 +56,7 @@ struct DispatchState {
 /// supplies one of its own for these wire calls.
 #[derive(Clone)]
 struct CheckInState {
+    channel: String,
     http: reqwest::Client,
     check_in_base_url: String,
     public_key_pem: String,
@@ -136,6 +138,9 @@ pub async fn run(config_json: String) {
         request_tx,
         check_in: CheckInState {
             http: reqwest::Client::new(),
+            channel: worker_config
+                .channel
+                .unwrap_or_else(|| "stable".to_string()),
             check_in_base_url: worker_config.check_in_base_url,
             public_key_pem: worker_config.public_key_pem,
             installation_id: uuid::Uuid::new_v4().to_string(),
@@ -310,7 +315,7 @@ async fn check_now(check_in: &CheckInState) -> Response {
         CheckInParams {
             connection: check_in.connection(),
             sdk_version: env!("CARGO_PKG_VERSION"),
-            channel: "stable",
+            channel: &check_in.channel,
             observed_version: env!("CARGO_PKG_VERSION"),
             platform: "test",
             arch: "test",
