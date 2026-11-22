@@ -83,6 +83,11 @@ pub fn start_cadence<R: Runtime>(shared: Arc<CadenceShared<R>>) -> Arc<Notify> {
 
     let focus_trigger = Arc::new(Notify::new());
 
+    #[cfg(feature = "test-service")]
+    if crate::test_service::directory().is_some() {
+        return focus_trigger;
+    }
+
     let shared_for_loop = shared.clone();
     let focus_trigger_for_loop = focus_trigger.clone();
     tauri::async_runtime::spawn(async move {
@@ -120,7 +125,7 @@ pub(crate) async fn resolve_connection_fields<R: Runtime>(
     (base_url, trusted_key_pem)
 }
 
-async fn tick<R: Runtime>(shared: &Arc<CadenceShared<R>>) {
+pub(crate) async fn tick<R: Runtime>(shared: &Arc<CadenceShared<R>>) {
     if shared.in_flight.swap(true, Ordering::SeqCst) {
         (shared.log)("cadence: tick skipped, a check-in is already in flight");
         return;
@@ -137,7 +142,7 @@ async fn tick<R: Runtime>(shared: &Arc<CadenceShared<R>>) {
         .hold_cache_max_age_ms
         .unwrap_or(DEFAULT_HOLD_CACHE_MAX_AGE_MS);
     if !policy_holds_the_vendor_check(
-        crate::POLICY.lock().unwrap().as_ref(),
+        crate::get_policy().as_ref(),
         hold_cache_max_age_ms,
         now_epoch_millis(),
     ) {
@@ -201,12 +206,11 @@ async fn apply_check_in_response<R: Runtime>(
 ) {
     shared.facts.clear(buffered_facts).await;
 
-    match verify_and_parse_policy(response, trusted_key_pem) {
-        Some(policy) => {
-            (shared.log)("policy: verified and updated");
-            crate::POLICY.lock().unwrap().replace(policy);
-        }
-        None => (shared.log)("policy: verification failed"),
+    if let Some(policy) = verify_and_parse_policy(response, trusted_key_pem) {
+        crate::POLICY.lock().unwrap().replace(policy);
+        (shared.log)("policy: verified and updated");
+    } else {
+        (shared.log)("policy: verification failed");
     }
 
     shared

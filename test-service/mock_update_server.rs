@@ -133,6 +133,16 @@ impl MockUpdateServer {
         }
     }
 
+    pub fn offer_update(&self) {
+        self._state.lock().unwrap().response = MockResponse::Available {
+            version: "2.0.0".to_string(),
+            notes: None,
+            signed_version: None,
+            corrupt_signature: None,
+            binary_fails: false,
+        };
+    }
+
     pub fn update_url(&self) -> String {
         format!("http://127.0.0.1:{}/update", self.port)
     }

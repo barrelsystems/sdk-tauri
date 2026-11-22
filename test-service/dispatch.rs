@@ -14,14 +14,11 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use serde::Deserialize;
 use tauri::test::mock_builder;
-use tauri_plugin_barrel_kit::protocol::check_in::{send_check_in, CheckInParams};
-use tauri_plugin_barrel_kit::protocol::policy::verify_and_parse_policy;
-use tauri_plugin_barrel_kit::protocol::pre_action_check::{
-    check_pre_action, PreActionCheckParams, Stage,
-};
+use tauri_plugin_barrel_kit::protocol::pre_action_check::Stage;
+use tauri_plugin_barrel_kit::test_service;
 use tauri_plugin_barrel_kit::{
-    get_adapter_state, get_last_update_error, subscribe_adapter_state, AdapterState,
-    BackendConnection, BarrelKitExt, InitConfig, UpdateFailure,
+    get_adapter_state, get_last_update_error, subscribe_adapter_state, AdapterState, BarrelKitExt,
+    InitConfig, UpdateFailure,
 };
 
 use crate::mock_update_server::{MockResponse, MockUpdateServer};
@@ -33,6 +30,7 @@ use crate::wire_types::{AdapterCommand, ResultWrapper};
 #[derive(Deserialize)]
 struct WorkerConfig {
     channel: Option<String>,
+    directory: std::path::PathBuf,
     #[serde(rename = "mockResponse")]
     mock_response: MockResponse,
     #[serde(rename = "checkInBaseUrl")]
@@ -41,48 +39,11 @@ struct WorkerConfig {
     public_key_pem: String,
 }
 
-/// Shared axum state for the `/command` handler. `check_in` backs the two
-/// commands (`checkNow`, `triggerPreActionCheck`) that talk to the
-/// check-in backend directly, bypassing the mock-app adapter thread
-/// entirely; `request_tx` is everything else, unchanged.
 #[derive(Clone)]
 struct DispatchState {
     request_tx: tokio::sync::mpsc::Sender<ThreadRequest>,
-    check_in: CheckInState,
+    app: tauri::AppHandle<tauri::test::MockRuntime>,
 }
-
-/// This test-service's own fixed stand-in credential/installation
-/// identity for check-in/pre-action-check calls -- the harness never
-/// supplies one of its own for these wire calls.
-#[derive(Clone)]
-struct CheckInState {
-    channel: String,
-    http: reqwest::Client,
-    check_in_base_url: String,
-    public_key_pem: String,
-    /// Fresh per worker process -- every adapter instance is its own
-    /// process in this SDK, so this is this instance's own identity, the
-    /// same way the other SDKs' test services generate one per instance.
-    installation_id: String,
-    /// Serializes `checkNow` the same way the real cadence loop's own
-    /// `in_flight` flag does -- two concurrent `checkNow` calls must never
-    /// reach the backend at the same time.
-    check_in_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
-}
-
-impl CheckInState {
-    fn connection(&self) -> BackendConnection<'_> {
-        BackendConnection {
-            base_url: &self.check_in_base_url,
-            credential: TEST_CREDENTIAL,
-            installation_id: &self.installation_id,
-        }
-    }
-}
-
-const TEST_CREDENTIAL: &str = "test-service-credential";
-
-fn noop_log(_message: &str) {}
 
 const SIGNING_KEY_B64: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IHJzaWduIGVuY3J5cHRlZCBzZWNyZXQga2V5ClJXUlRZMEl5U09xQ0dNSi9YeWhyeUFMb214WVlGZVg1bVM1Nk5CSHpycEhSOEFLZDFDRUFBQkFBQUFBQUFBQUFBQUlBQUFBQUlxeklvZ3hOdldra01GOGt6ZlNIbjg4OWl4djRJV3hkeWFnQkRlcHM4TGhrSXo2QVZ6U0F6MFpBcDk5YWFEMkt1c3JKSnFXb1lEeERVTE1yTklNRUxVWXNwa1k4UjE3SlZzNStROWg0TG9FN1lSTUg1YkorZ0RMRGIrQXpMOVh0TDV2NWhVRXIyWFk9Cg==";
 
@@ -111,6 +72,10 @@ enum ThreadRequest {
     GetLastError(tokio::sync::oneshot::Sender<Option<UpdateFailure>>),
     TriggerDownload(tokio::sync::oneshot::Sender<Option<AdapterState>>),
     StartDownload(tokio::sync::oneshot::Sender<Option<AdapterState>>),
+    PrepareAction {
+        stage: Stage,
+        reply: tokio::sync::oneshot::Sender<()>,
+    },
 }
 
 pub async fn run(config_json: String) {
@@ -125,28 +90,10 @@ pub async fn run(config_json: String) {
     let (request_tx, request_rx) = tokio::sync::mpsc::channel::<ThreadRequest>(8);
 
     std::thread::spawn(move || {
-        run_adapter_thread(
-            worker_config.mock_response,
-            signing_key,
-            request_rx,
-            ready_tx,
-        )
+        run_adapter_thread(worker_config, signing_key, request_rx, ready_tx)
     });
-    ready_rx.await.expect("adapter thread died before starting");
-
-    let state = DispatchState {
-        request_tx,
-        check_in: CheckInState {
-            http: reqwest::Client::new(),
-            channel: worker_config
-                .channel
-                .unwrap_or_else(|| "stable".to_string()),
-            check_in_base_url: worker_config.check_in_base_url,
-            public_key_pem: worker_config.public_key_pem,
-            installation_id: uuid::Uuid::new_v4().to_string(),
-            check_in_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
-        },
-    };
+    let app = ready_rx.await.expect("adapter thread died before starting");
+    let state = DispatchState { request_tx, app };
     let router = Router::new()
         .route("/command", post(dispatch_command))
         .with_state(state);
@@ -162,10 +109,10 @@ pub async fn run(config_json: String) {
 /// Owns the `App<MockRuntime>` for this worker's whole lifetime, on its
 /// own thread with its own single-threaded runtime -- never shared.
 fn run_adapter_thread(
-    mock_response: MockResponse,
+    config: WorkerConfig,
     signing_key: std::sync::Arc<minisign::SecretKey>,
     mut request_rx: tokio::sync::mpsc::Receiver<ThreadRequest>,
-    ready_tx: tokio::sync::oneshot::Sender<()>,
+    ready_tx: tokio::sync::oneshot::Sender<tauri::AppHandle<tauri::test::MockRuntime>>,
 ) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -173,17 +120,20 @@ fn run_adapter_thread(
         .expect("local runtime builds");
 
     runtime.block_on(async move {
-        let update_feed_url = match &mock_response {
+        test_service::configure(config.directory, &config.public_key_pem)
+            .expect("isolated storage");
+        let update_feed_url = match &config.mock_response {
             MockResponse::ConnectionRefused => Some("http://127.0.0.1:1/unreachable".to_string()),
             MockResponse::InvalidFeedUrl => Some("not a valid url at all".to_string()),
             _ => None,
         };
-        let mock_server = MockUpdateServer::start(mock_response, signing_key).await;
+        let mock_server = MockUpdateServer::start(config.mock_response, signing_key).await;
         let update_feed_url = update_feed_url.unwrap_or_else(|| mock_server.update_url());
 
         let config = InitConfig {
             credential: "test-credential".to_string(),
-            base_url: Some("http://127.0.0.1:1/unreachable".to_string()),
+            base_url: Some(config.check_in_base_url),
+            channel: config.channel,
             update_feed_url: Some(update_feed_url),
             // Off, unlike the real default -- otherwise a found update
             // races straight past `Available` into downloading within
@@ -202,11 +152,15 @@ fn run_adapter_thread(
         // `changed()` check can tell "already settled" apart from "hasn't
         // moved yet", even if the real transition circles back to this value.
         state_rx.borrow_and_update();
-        wait_until_settled(&mut state_rx).await;
-        let _ = ready_tx.send(());
+        let _ = ready_tx.send(app.handle().clone());
 
         while let Some(request) = request_rx.recv().await {
             match request {
+                ThreadRequest::PrepareAction { stage, reply } => {
+                    mock_server.offer_update();
+                    test_service::prepare_action(app.handle(), stage).await;
+                    let _ = reply.send(());
+                }
                 ThreadRequest::GetState(reply) => {
                     let _ = reply.send(get_adapter_state(app.handle()));
                 }
@@ -275,6 +229,10 @@ async fn dispatch_command(
     Json(command): Json<AdapterCommand>,
 ) -> Response {
     match command {
+        AdapterCommand::GetPolicy => Json(ResultWrapper {
+            result: tauri_plugin_barrel_kit::get_policy(),
+        })
+        .into_response(),
         AdapterCommand::GetAdapterState => {
             send_adapter_request(&state.request_tx, ThreadRequest::GetState).await
         }
@@ -292,92 +250,51 @@ async fn dispatch_command(
             format!("tauri test-service: unknown injectEvent eventName {event_name:?}"),
         )
             .into_response(),
-        // Exercises the check-in call itself, not update-lifecycle state --
-        // `getAdapterState` keeps answering from the mock app's own real
-        // state regardless of what this check-in resolves to.
-        AdapterCommand::CheckNow => check_now(&state.check_in).await,
-        AdapterCommand::TriggerPreActionCheck { stage } => {
-            trigger_pre_action_check(&state.check_in, &stage).await
+        AdapterCommand::GetUpdaterActivity => Json(ResultWrapper {
+            result: test_service::activity(),
+        })
+        .into_response(),
+        AdapterCommand::CheckNow => {
+            test_service::check_now(&state.app).await;
+            Json(ResultWrapper {
+                result: serde_json::Value::Null,
+            })
+            .into_response()
+        }
+        AdapterCommand::PrepareAction { stage } => {
+            let Some(stage) = parse_stage(&stage) else {
+                return StatusCode::BAD_REQUEST.into_response();
+            };
+            let (reply, result) = tokio::sync::oneshot::channel();
+            let _ = state
+                .request_tx
+                .send(ThreadRequest::PrepareAction { stage, reply })
+                .await;
+            let _ = result.await;
+            Json(ResultWrapper {
+                result: serde_json::Value::Null,
+            })
+            .into_response()
+        }
+        AdapterCommand::RunAction { stage } => {
+            let Some(stage) = parse_stage(&stage) else {
+                return StatusCode::BAD_REQUEST.into_response();
+            };
+            test_service::run_action(&state.app, stage).await;
+            Json(ResultWrapper {
+                result: test_service::activity(),
+            })
+            .into_response()
         }
     }
 }
 
-/// `checkNow`: sends one real check-in against the stored
-/// `checkInBaseUrl` and verifies the response against the stored
-/// `publicKeyPem`.
-async fn check_now(check_in: &CheckInState) -> Response {
-    // Awaited in full before replying -- a scenario calling
-    // `getAdapterState` right after this call returns expects it already done.
-    let _guard = check_in.check_in_lock.lock().await;
-    let attributes = std::collections::HashMap::new();
-    let response = send_check_in(
-        &check_in.http,
-        CheckInParams {
-            connection: check_in.connection(),
-            sdk_version: env!("CARGO_PKG_VERSION"),
-            channel: &check_in.channel,
-            observed_version: env!("CARGO_PKG_VERSION"),
-            platform: "test",
-            arch: "test",
-            os_version: "test",
-            attributes: &attributes,
-            adapter_state: AdapterState::Idle,
-            buffered_facts: Vec::new(),
-        },
-        &noop_log,
-    )
-    .await;
-
-    // Fails open on a hung/failing/unverifiable check-in, same as the
-    // real cadence loop -- there's nothing else for this command to do
-    // with the resolved policy, since it doesn't drive adapter state here.
-    let _policy = response.and_then(|r| verify_and_parse_policy(&r, &check_in.public_key_pem));
-
-    Json(ResultWrapper {
-        result: serde_json::Value::Null,
-    })
-    .into_response()
-}
-
-/// `triggerPreActionCheck`: sends one real pre-action-check for `stage`
-/// and reports the resolved policy's own `type` tag as `result`, e.g.
-/// `"held"` -- a failed/unverifiable response fails open, reporting `"current"`.
-async fn trigger_pre_action_check(check_in: &CheckInState, stage: &str) -> Response {
-    let stage = match stage {
-        "pre-download" => Stage::PreDownload,
-        "pre-apply" => Stage::PreApply,
-        other => {
-            return (
-                StatusCode::BAD_REQUEST,
-                format!("tauri test-service: unknown pre-action-check stage {other:?}"),
-            )
-                .into_response()
-        }
-    };
-
-    let policy = check_pre_action(
-        &check_in.http,
-        PreActionCheckParams {
-            connection: check_in.connection(),
-            stage,
-            trusted_key_pem: &check_in.public_key_pem,
-        },
-        &noop_log,
-    )
-    .await;
-
-    // A failed/unverifiable check-in fails open, same as `host_control.rs`
-    // elsewhere -- reported as the `current` Policy's own tag, not `null`.
-    let result = policy
-        .and_then(|policy| serde_json::to_value(&policy).ok())
-        .and_then(|value| {
-            value
-                .get("type")
-                .and_then(|t| t.as_str().map(str::to_string))
-        })
-        .or_else(|| Some("current".to_string()));
-
-    Json(ResultWrapper { result }).into_response()
+fn parse_stage(stage: &str) -> Option<Stage> {
+    match stage {
+        "pre-download" => Some(Stage::PreDownload),
+        "pre-apply" => Some(Stage::PreApply),
+        _ => None,
+    }
 }
 
 /// Shared shape behind every `AdapterCommand` that round-trips to the
