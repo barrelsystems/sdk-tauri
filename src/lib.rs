@@ -179,6 +179,7 @@ fn plugin<R: Runtime>(config: InitConfig) -> TauriPlugin<R> {
             Ok(())
         })
         .on_event(|app, event| match event {
+            RunEvent::WindowEvent { event, .. } => handle_window_event(event),
             RunEvent::ExitRequested { api, .. } => {
                 if let Some(shared) = shared_for::<R>(app) {
                     if shared.host_control.has_pending_install() {
@@ -195,6 +196,9 @@ fn plugin<R: Runtime>(config: InitConfig) -> TauriPlugin<R> {
             // needs this synchronous, guaranteed-to-run fallback.
             RunEvent::Exit => {
                 if let Some(shared) = shared_for::<R>(app) {
+                    shared
+                        .installation_ids
+                        .flush_sync(&shared.installation_id_path);
                     shared.facts.flush_sync();
                 }
             }
@@ -252,7 +256,11 @@ async fn bootstrap<R: Runtime>(app: AppHandle<R>, config: InitConfig) {
     }
 
     let log: Box<dyn Fn(&str) + Send + Sync> = if config.debug {
-        Box::new(|message: &str| eprintln!("[barrel-kit] {message}"))
+        Box::new(|message: &str| {
+            #[cfg(feature = "test-service")]
+            test_service::resilience_commands::record_log(message);
+            eprintln!("[barrel-kit] {message}");
+        })
     } else {
         Box::new(|_: &str| {})
     };
@@ -310,6 +318,8 @@ async fn bootstrap<R: Runtime>(app: AppHandle<R>, config: InitConfig) {
         version_expectation_path,
         host_control: HostControl::new(),
         installation_id,
+        installation_ids,
+        installation_id_path,
         config,
         sdk_version: SDK_VERSION.to_string(),
         log,
@@ -325,17 +335,13 @@ async fn bootstrap<R: Runtime>(app: AppHandle<R>, config: InitConfig) {
 
     let focus_trigger = start_cadence(shared);
     let _ = FOCUS_TRIGGER.set(focus_trigger.clone());
+}
 
-    // `on_window_event` is per-window, not app-wide -- every window this
-    // app already has (and the plugin only ever runs after app setup, so
-    // the main window already exists) gets the same focus listener.
-    for window in app.webview_windows().values() {
-        let focus_trigger = focus_trigger.clone();
-        window.on_window_event(move |event| {
-            if let WindowEvent::Focused(true) = event {
-                focus_trigger.notify_one();
-            }
-        });
+fn handle_window_event(event: &WindowEvent) {
+    if matches!(event, WindowEvent::Focused(true)) {
+        if let Some(trigger) = FOCUS_TRIGGER.get() {
+            trigger.notify_one();
+        }
     }
 }
 

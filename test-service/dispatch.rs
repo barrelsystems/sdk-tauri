@@ -13,6 +13,15 @@ pub(crate) async fn dispatch_command(
     Json(command): Json<AdapterCommand>,
 ) -> Response {
     match command {
+        AdapterCommand::GetCadenceState => Json(ResultWrapper { result: test_service::resilience_commands::cadence_state(&state.app) }).into_response(),
+        AdapterCommand::RestoreInstallationPersistence => Json(ResultWrapper { result: test_service::resilience_commands::restore_installation_persistence(&state.app) }).into_response(),
+        AdapterCommand::GetPersistedInstallationId => Json(ResultWrapper {
+            result: test_service::resilience_commands::persisted_installation_id(&state.app).await,
+        }).into_response(),
+        AdapterCommand::TriggerLifecycle { event } => {
+            if !test_service::resilience_commands::trigger_lifecycle(&event) { return StatusCode::BAD_REQUEST.into_response(); }
+            Json(ResultWrapper { result: serde_json::Value::Null }).into_response()
+        }
         AdapterCommand::SetBufferPersistence { mode } => {
             test_service::buffer_persistence_control::set_buffer_persistence(&state.app, mode).await;
             Json(ResultWrapper {
