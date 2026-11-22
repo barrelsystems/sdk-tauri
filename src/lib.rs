@@ -265,7 +265,7 @@ async fn bootstrap<R: Runtime>(app: AppHandle<R>, config: InitConfig) {
         .app_data_dir()
         .expect("Barrel: could not resolve this app's data directory");
     #[cfg(feature = "test-service")]
-    let data_dir = test_service::directory().unwrap_or(data_dir);
+    let data_dir = test_service::runtime::directory().unwrap_or(data_dir);
 
     let installation_id_path = data_dir.join("barrel-installation.json");
     let facts_path = data_dir.join("barrel-buffered-facts.json");

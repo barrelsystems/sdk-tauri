@@ -87,3 +87,10 @@ pub async fn run_action<R: Runtime>(app: &AppHandle<R>, stage: Stage) {
         Stage::PreApply => crate::perform_apply(shared).await,
     }
 }
+
+/// Waits for the production bootstrap to publish its initialized stores.
+pub async fn wait_until_ready<R: Runtime>(app: &AppHandle<R>) {
+    while crate::shared_for(app).is_none() {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}

@@ -84,7 +84,7 @@ pub fn start_cadence<R: Runtime>(shared: Arc<CadenceShared<R>>) -> Arc<Notify> {
     let focus_trigger = Arc::new(Notify::new());
 
     #[cfg(feature = "test-service")]
-    if crate::test_service::directory().is_some() {
+    if crate::test_service::runtime::directory().is_some() {
         return focus_trigger;
     }
 

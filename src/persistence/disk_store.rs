@@ -22,7 +22,7 @@ impl<R: Runtime> DiskStore<R> {
         let path = path.to_path_buf();
         let key = key.to_string();
         tokio::task::spawn_blocking(move || {
-            let store = app.store(&path).ok()?;
+            let store = app.store_builder(&path).disable_auto_save().build().ok()?;
             let _ = store.reload();
             store.get(&key)
         })
@@ -37,7 +37,7 @@ impl<R: Runtime> DiskStore<R> {
         let path = path.to_path_buf();
         let key = key.to_string();
         let _ = tokio::task::spawn_blocking(move || -> Option<()> {
-            let store = app.store(&path).ok()?;
+            let store = app.store_builder(&path).disable_auto_save().build().ok()?;
             store.set(key, value);
             store.save().ok()
         })
@@ -47,7 +47,7 @@ impl<R: Runtime> DiskStore<R> {
     /// The synchronous counterpart to `write`, for the one call site that
     /// can't `.await` (`RunEvent::Exit`). Fails open, same as `write`.
     pub fn write_sync(&self, path: &Path, key: &str, value: serde_json::Value) {
-        let Ok(store) = self.app.store(path) else {
+        let Ok(store) = self.app.store_builder(path).disable_auto_save().build() else {
             return;
         };
         store.set(key.to_string(), value);
