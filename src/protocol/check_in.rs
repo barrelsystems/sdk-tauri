@@ -19,6 +19,8 @@ pub struct CheckInParams<'a> {
     pub connection: BackendConnection<'a>,
     /// This SDK's own version.
     pub sdk_version: &'a str,
+    /// The release channel reported by the host app.
+    pub channel: &'a str,
     /// The app version this installation is currently running.
     pub observed_version: &'a str,
     /// The host OS platform name.
@@ -49,6 +51,7 @@ pub async fn send_check_in(
         event_id: Uuid::new_v4().to_string(),
         checked_in_at: now_iso8601(),
         sdk_version: params.sdk_version.to_string(),
+        channel: params.channel.to_string(),
         observed_version: params.observed_version.to_string(),
         platform: params.platform.to_string(),
         arch: params.arch.to_string(),
@@ -166,6 +169,80 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn sends_the_host_channel_on_check_in() {
+        use crate::types::InitConfig;
+        use std::io::{Read, Write};
+
+        for configured in [None, Some("Beta / Custom".to_string())] {
+            let config = InitConfig {
+                channel: configured.clone(),
+                ..Default::default()
+            };
+            let expected = configured.as_deref().unwrap_or("stable").to_string();
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let server = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+
+                let mut request = Vec::new();
+                let mut bytes = [0; 4096];
+
+                loop {
+                    let count = socket.read(&mut bytes).unwrap();
+                    assert!(count > 0);
+                    request.extend_from_slice(&bytes[..count]);
+
+                    if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                        if let Ok(body) =
+                            serde_json::from_slice::<serde_json::Value>(&request[end + 4..])
+                        {
+                            assert_eq!(body["channel"], expected);
+                            break;
+                        }
+                    }
+                }
+
+                let body = r#"{"protocolVersion":1,"policy":"{}","signature":"sig"}"#;
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            });
+
+            let response = send_check_in(
+                &reqwest::Client::new(),
+                CheckInParams {
+                    connection: BackendConnection {
+                        base_url: &base_url,
+                        credential: "cred",
+                        installation_id: "install",
+                    },
+                    sdk_version: "1.0.0",
+                    channel: config.channel.as_deref().unwrap_or("stable"),
+                    observed_version: "1.0.0",
+                    platform: "test",
+                    arch: "test",
+                    os_version: "test",
+                    attributes: &HashMap::new(),
+                    adapter_state: AdapterState::Idle,
+                    buffered_facts: vec![],
+                },
+                &|_| {},
+            )
+            .await;
+
+            assert!(response.is_some());
+            server.join().unwrap();
+        }
+    }
 
     #[test]
     fn parses_a_well_formed_timestamp_into_the_right_epoch_millis() {

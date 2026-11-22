@@ -101,6 +101,7 @@ async fn create_adapter(
         "mockResponse": mock_response,
         "checkInBaseUrl": payload.check_in_base_url,
         "publicKeyPem": payload.public_key_pem,
+        "channel": payload.channel,
     })
     .to_string();
 

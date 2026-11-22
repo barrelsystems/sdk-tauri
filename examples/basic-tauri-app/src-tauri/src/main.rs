@@ -1,8 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use tauri_plugin_barrel_kit::BarrelKitExt;
 use serde::Serialize;
 use tauri::{AppHandle, Runtime};
+use tauri_plugin_barrel_kit::BarrelKitExt;
 
 #[derive(Serialize)]
 struct Status {
@@ -47,7 +47,10 @@ fn watch_and_auto_download<R: Runtime>(app: &AppHandle<R>) {
                 "[barrel-kit] adapterState: {}",
                 serde_json::to_string(&state).unwrap_or_default()
             );
-            if matches!(state, tauri_plugin_barrel_kit::AdapterState::Available { .. }) {
+            if matches!(
+                state,
+                tauri_plugin_barrel_kit::AdapterState::Available { .. }
+            ) {
                 tauri_plugin_barrel_kit::download_update(&handle);
             }
             if receiver.changed().await.is_err() {
@@ -69,6 +72,7 @@ fn main() {
             // exercises the manual trigger, as a real `auto_download: false` host would.
             auto_download: Some(false),
             check_in_interval_ms: None,
+            channel: None,
             attributes: Default::default(),
             hold_cache_max_age_ms: None,
         })

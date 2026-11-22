@@ -29,8 +29,10 @@ pub struct InitConfig {
     /// Developer-configurable; the server-enforced floor is 15 minutes regardless of what's passed here.
     pub check_in_interval_ms: Option<u64>,
     /// Arbitrary key-value pairs sent with every check-in, for segmenting
-    /// policy decisions (e.g. a release channel or cohort).
+    /// policy decisions (e.g. a cohort).
     pub attributes: HashMap<String, String>,
+    /// The host app's release channel, reported verbatim. Defaults to "stable".
+    pub channel: Option<String>,
     /// On by default. When off, a found update is never downloaded.
     pub auto_download: Option<bool>,
     /// Where your own update feed lives. Omit to use `tauri.conf.json`'s
@@ -177,6 +179,7 @@ pub struct CheckInRequest {
     /// ISO 8601, set at the moment this request is built.
     pub checked_in_at: String,
     pub sdk_version: String,
+    pub channel: String,
     /// The app version this installation is currently running.
     pub observed_version: String,
     pub platform: String,
