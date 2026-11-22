@@ -13,14 +13,23 @@ concurrency:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
-  verify:
-    runs-on: ubuntu-22.04
+  verify-platform:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-15, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
       - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
@@ -50,12 +59,17 @@ jobs:
         run: cargo build
 
   conformance:
-    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-15, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
       - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
@@ -88,10 +102,34 @@ jobs:
       - name: Run conformance
         run: |
           set -euo pipefail
-          ./target/debug/test-service > /tmp/test-service.log 2>&1 &
-          for _ in $(seq 1 50); do
-            port=$(grep -o 'http://127.0.0.1:[0-9]*' /tmp/test-service.log | tail -1 | grep -o '[0-9]*$' || true)
-            [ -n "$port" ] && break
+          log="$RUNNER_TEMP/test-service.log"
+          ./target/debug/test-service > "$log" 2>&1 &
+          service_pid=$!
+          trap 'kill "$service_pid" 2>/dev/null || true' EXIT
+          for _ in {1..100}; do
+            url=$(grep -oE 'http://127.0.0.1:[0-9]+' "$log" | tail -1 || true)
+            [ -n "$url" ] && break
+            kill -0 "$service_pid" 2>/dev/null || { cat "$log"; exit 1; }
             sleep 0.2
           done
-          node sdk-conformance-harness/dist/cli.js conformance "http://127.0.0.1:$port" --junit conformance.xml
+          if [ -z "$url" ]; then
+            cat "$log"
+            echo "::error::Test service did not become ready"
+            exit 1
+          fi
+          node sdk-conformance-harness/dist/cli.js conformance "$url" --junit "$RUNNER_TEMP/conformance.xml" --history "$RUNNER_TEMP/conformance-history.json"
+
+      - name: Show test-service diagnostics
+        if: failure()
+        run: cat "$RUNNER_TEMP/test-service.log" 2>/dev/null || true
+
+  verify:
+    if: always()
+    needs: [verify-platform, conformance]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every platform and conformance run to pass
+        env:
+          PLATFORM_RESULT: ${{ needs.verify-platform.result }}
+          CONFORMANCE_RESULT: ${{ needs.conformance.result }}
+        run: test "$PLATFORM_RESULT" = success && test "$CONFORMANCE_RESULT" = success

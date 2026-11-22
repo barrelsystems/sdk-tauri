@@ -83,9 +83,10 @@ pub fn map_updater_error(error: &UpdaterError) -> (UpdateFailureMode, Phase, &'s
             "MissingSignedVersion",
         ),
         UpdaterError::Tauri(_) => (Unknown, Phase::Unknown, "Tauri"),
-        // `Extract` only exists under `cfg(windows, feature = "zip")`, which
-        // this crate doesn't enable -- the wildcard below covers it (and any
-        // future added variant) without needing that cfg combination here.
+        #[cfg(target_os = "windows")]
+        UpdaterError::Extract(_) => (ExtractionFailed, Phase::Extract, "Extract"),
+        // The upstream enum is non-exhaustive; future variants keep their
+        // unknown classification until an explicit mapping is available.
         #[allow(unreachable_patterns)]
         _ => (Unknown, Phase::Unknown, "unknown"),
     }
@@ -185,85 +186,245 @@ mod tests {
         assert_eq!(phase, Phase::Extract);
     }
 
-    /// The real variant count of `tauri_plugin_updater::Error` at the
-    /// currently-pinned version (2.14.1): 32 variants compiled in on this
-    /// platform, plus `Extract` (only under `cfg(windows, feature = "zip")`).
-    const KNOWN_UPDATER_ERROR_VARIANT_COUNT: usize = 33;
-
     #[test]
-    fn map_updater_error_handles_every_known_variant_explicitly() {
-        // One constructed instance per real variant, in `error.rs` source
-        // order -- constructing by name means a rename or removal fails to
-        // *compile*, not just to match, for every variant this enum still has.
-        let samples: Vec<UpdaterError> = vec![
-            UpdaterError::EmptyEndpoints,
-            UpdaterError::Io(std::io::Error::other("x")),
-            UpdaterError::Semver(semver::Version::parse("not-semver").unwrap_err()),
-            UpdaterError::Serialization(
-                serde_json::from_str::<serde_json::Value>("{").unwrap_err(),
+    fn every_native_error_has_the_exact_classification_and_identifier() {
+        use tauri::http;
+
+        let cases = vec![
+            (
+                UpdaterError::EmptyEndpoints,
+                ManifestUnreachable,
+                Phase::Check,
+                "EmptyEndpoints",
             ),
-            UpdaterError::ReleaseNotFound,
-            UpdaterError::UnsupportedArch,
-            UpdaterError::UnsupportedOs,
-            UpdaterError::FailedToDetermineExtractPath,
-            UpdaterError::UrlParse(url::Url::parse("not a url").unwrap_err()),
-            UpdaterError::TargetNotFound("x".to_string()),
-            UpdaterError::TargetsNotFound(vec!["x".to_string()]),
-            UpdaterError::Network("x".to_string()),
-            UpdaterError::Minisign(match minisign_verify::Signature::decode("not valid") {
-                Err(error) => error,
-                Ok(_) => panic!("expected an invalid minisign signature to fail decoding"),
-            }),
-            UpdaterError::Base64(
-                base64_for_updater_error_test::Engine::decode(
-                    &base64_for_updater_error_test::engine::general_purpose::STANDARD,
-                    "not valid!!",
-                )
-                .unwrap_err(),
+            (
+                UpdaterError::Io(std::io::Error::other("x")),
+                InstallWriteFailed,
+                Phase::Install,
+                "Io",
             ),
-            UpdaterError::SignatureUtf8("x".to_string()),
-            // `Extract` only exists under `cfg(windows, feature = "zip")`
-            // (not enabled here), so it can't be constructed -- it's covered
-            // by `map_updater_error`'s wildcard arm, counted but not sampled.
-            UpdaterError::TempDirNotOnSameMountPoint,
-            UpdaterError::PreviousAppNotRestored(std::path::PathBuf::from("/x")),
-            UpdaterError::BinaryNotFoundInArchive,
-            UpdaterError::TempDirNotFound,
-            UpdaterError::AuthenticationFailed,
-            UpdaterError::DebInstallFailed,
-            UpdaterError::PackageInstallFailed,
-            UpdaterError::InvalidUpdaterFormat,
-            UpdaterError::FormatDate,
-            UpdaterError::InsecureTransportProtocol,
-            UpdaterError::SignedVersionMismatch {
-                signed: "1.0.0".to_string(),
-                announced: "2.0.0".to_string(),
-            },
-            UpdaterError::MissingSignedVersion,
-            UpdaterError::Tauri(tauri::Error::AssetNotFound(String::new())),
+            (
+                UpdaterError::Semver(semver::Version::parse("invalid").unwrap_err()),
+                VersionInvalid,
+                Phase::Check,
+                "Semver",
+            ),
+            (
+                UpdaterError::Serialization(
+                    serde_json::from_str::<serde_json::Value>("{").unwrap_err(),
+                ),
+                ManifestParseFailed,
+                Phase::Check,
+                "Serialization",
+            ),
+            (
+                UpdaterError::ReleaseNotFound,
+                ManifestUnreachable,
+                Phase::Check,
+                "ReleaseNotFound",
+            ),
+            (
+                UpdaterError::UnsupportedArch,
+                PlatformUnsupported,
+                Phase::Config,
+                "UnsupportedArch",
+            ),
+            (
+                UpdaterError::UnsupportedOs,
+                PlatformUnsupported,
+                Phase::Config,
+                "UnsupportedOs",
+            ),
+            (
+                UpdaterError::FailedToDetermineExtractPath,
+                ConfigInvalid,
+                Phase::Config,
+                "FailedToDetermineExtractPath",
+            ),
+            (
+                UpdaterError::UrlParse(url::Url::parse("not a url").unwrap_err()),
+                ConfigInvalid,
+                Phase::Config,
+                "UrlParse",
+            ),
+            (
+                UpdaterError::Reqwest(
+                    reqwest_for_updater_error_test::Client::builder()
+                        .user_agent("\n")
+                        .build()
+                        .unwrap_err(),
+                ),
+                DownloadTransportFailed,
+                Phase::Download,
+                "Reqwest",
+            ),
+            (
+                UpdaterError::TargetNotFound("x".into()),
+                TargetNotFoundInManifest,
+                Phase::Download,
+                "TargetNotFound",
+            ),
+            (
+                UpdaterError::TargetsNotFound(vec!["x".into()]),
+                TargetNotFoundInManifest,
+                Phase::Download,
+                "TargetsNotFound",
+            ),
+            (
+                UpdaterError::Network("x".into()),
+                DownloadTransportFailed,
+                Phase::Download,
+                "Network",
+            ),
+            (
+                UpdaterError::Minisign(
+                    minisign_verify::Signature::decode("invalid")
+                        .err()
+                        .expect("invalid signature"),
+                ),
+                SignatureInvalid,
+                Phase::Verify,
+                "Minisign",
+            ),
+            (
+                UpdaterError::Base64(
+                    base64_for_updater_error_test::Engine::decode(
+                        &base64_for_updater_error_test::engine::general_purpose::STANDARD,
+                        "!",
+                    )
+                    .unwrap_err(),
+                ),
+                SignatureInvalid,
+                Phase::Verify,
+                "Base64",
+            ),
+            (
+                UpdaterError::SignatureUtf8("x".into()),
+                SignatureInvalid,
+                Phase::Verify,
+                "SignatureUtf8",
+            ),
+            #[cfg(target_os = "windows")]
+            (
+                UpdaterError::Extract(zip::result::ZipError::FileNotFound),
+                ExtractionFailed,
+                Phase::Extract,
+                "Extract",
+            ),
+            (
+                UpdaterError::TempDirNotOnSameMountPoint,
+                TempStorageConstraint,
+                Phase::Extract,
+                "TempDirNotOnSameMountPoint",
+            ),
+            (
+                UpdaterError::PreviousAppNotRestored("/x".into()),
+                InstallWriteFailed,
+                Phase::Install,
+                "PreviousAppNotRestored",
+            ),
+            (
+                UpdaterError::BinaryNotFoundInArchive,
+                TargetNotFoundInManifest,
+                Phase::Download,
+                "BinaryNotFoundInArchive",
+            ),
+            (
+                UpdaterError::TempDirNotFound,
+                TempStorageConstraint,
+                Phase::Extract,
+                "TempDirNotFound",
+            ),
+            (
+                UpdaterError::AuthenticationFailed,
+                InstallAuthRequiredOrFailed,
+                Phase::Install,
+                "AuthenticationFailed",
+            ),
+            (
+                UpdaterError::DebInstallFailed,
+                InstallWriteFailed,
+                Phase::Install,
+                "DebInstallFailed",
+            ),
+            (
+                UpdaterError::PackageInstallFailed,
+                InstallWriteFailed,
+                Phase::Install,
+                "PackageInstallFailed",
+            ),
+            (
+                UpdaterError::InvalidUpdaterFormat,
+                ExtractionFailed,
+                Phase::Extract,
+                "InvalidUpdaterFormat",
+            ),
+            (
+                UpdaterError::Http(
+                    http::Request::builder()
+                        .header("bad header", "x")
+                        .body(())
+                        .unwrap_err(),
+                ),
+                DownloadTransportFailed,
+                Phase::Download,
+                "Http",
+            ),
+            (
+                UpdaterError::InvalidHeaderValue(http::HeaderValue::from_bytes(b"\n").unwrap_err()),
+                DownloadTransportFailed,
+                Phase::Download,
+                "InvalidHeaderValue",
+            ),
+            (
+                UpdaterError::InvalidHeaderName(
+                    http::header::HeaderName::from_bytes(b"bad header").unwrap_err(),
+                ),
+                DownloadTransportFailed,
+                Phase::Download,
+                "InvalidHeaderName",
+            ),
+            (
+                UpdaterError::FormatDate,
+                ConfigInvalid,
+                Phase::Config,
+                "FormatDate",
+            ),
+            (
+                UpdaterError::InsecureTransportProtocol,
+                ConfigInvalid,
+                Phase::Config,
+                "InsecureTransportProtocol",
+            ),
+            (
+                UpdaterError::SignedVersionMismatch {
+                    signed: "1.0.0".into(),
+                    announced: "2.0.0".into(),
+                },
+                SignatureVersionMismatch,
+                Phase::Verify,
+                "SignedVersionMismatch",
+            ),
+            (
+                UpdaterError::MissingSignedVersion,
+                SignatureVersionMismatch,
+                Phase::Verify,
+                "MissingSignedVersion",
+            ),
+            (
+                UpdaterError::Tauri(tauri::Error::AssetNotFound("x".into())),
+                Unknown,
+                Phase::Unknown,
+                "Tauri",
+            ),
         ];
+        let expected_count = if cfg!(target_os = "windows") { 33 } else { 32 };
+        assert_eq!(cases.len(), expected_count);
+        let mut identifiers = std::collections::HashSet::new();
 
-        // `Extract` (cfg-gated) and the variants wrapping `reqwest::Error`,
-        // `http::Error`, `InvalidHeaderValue`, and `InvalidHeaderName` have
-        // no safe, version-stable constructor, so they're omitted above.
-        const UNSAMPLED_VARIANTS: usize = 5; // Extract, Reqwest, Http, InvalidHeaderValue, InvalidHeaderName.
-        assert_eq!(
-            samples.len() + UNSAMPLED_VARIANTS,
-            KNOWN_UPDATER_ERROR_VARIANT_COUNT,
-            "tauri_plugin_updater::Error's variant count has drifted -- \
-             re-audit map_updater_error's match arms and the dead \
-             UpdateFailureMode removal list before updating \
-             KNOWN_UPDATER_ERROR_VARIANT_COUNT."
-        );
-
-        for sample in &samples {
-            let (_, _, platform_code) = map_updater_error(sample);
-            assert_ne!(
-                platform_code, "unknown",
-                "a variant constructed in this test fell through to \
-                 map_updater_error's wildcard arm -- it needs its own match \
-                 arm"
-            );
+        for (error, mode, phase, code) in cases {
+            assert!(identifiers.insert(code), "duplicate sample: {code}");
+            assert_eq!(map_updater_error(&error), (mode, phase, code), "{code}");
         }
     }
 }
