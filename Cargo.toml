@@ -32,6 +32,9 @@ base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+minisign = "0.10"
+# Match the updater's HTTP client when constructing native errors in tests.
+reqwest-for-updater-error-test = { package = "reqwest", version = "0.13", default-features = false }
 tokio = { version = "1", features = ["rt", "time", "sync", "macros", "test-util"] }
 tempfile = "3"
 # Unlocks `tauri::test` (mock app/runtime) for plain `cargo test`, without
@@ -47,6 +50,9 @@ minisign-verify = "0.3"
 # tauri-plugin-updater pulls a newer `base64` (0.23) than this crate's own
 # runtime dependency (0.22) -- renamed so both can coexist, dev-only.
 base64-for-updater-error-test = { package = "base64", version = "0.23" }
+
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+zip = { version = "9", default-features = false }
 
 [features]
 # Never shipped -- isolates the test service's own dependencies (axum,
