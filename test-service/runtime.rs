@@ -25,6 +25,14 @@ use crate::mock_update_server::{MockResponse, MockUpdateServer};
 /// always carries, regardless of whether a `variant` was also given.
 #[derive(Deserialize)]
 struct WorkerConfig {
+    attributes: Option<std::collections::HashMap<String, String>>,
+    debug: Option<bool>,
+    #[serde(rename = "checkInIntervalMs")]
+    check_in_interval_ms: Option<u64>,
+    lifecycle: Option<bool>,
+    #[serde(rename = "installationPersistence")]
+    installation_persistence: Option<String>,
+
     channel: Option<String>,
     directory: std::path::PathBuf,
     #[serde(rename = "mockResponse")]
@@ -116,6 +124,11 @@ fn run_adapter_thread(
         .expect("local runtime builds");
 
     runtime.block_on(async move {
+        test_service::resilience_commands::configure(config.lifecycle.unwrap_or(false));
+        if config.installation_persistence.as_deref() == Some("failed") {
+            std::fs::create_dir_all(config.directory.join("barrel-installation.json"))
+                .expect("failed installation fixture");
+        }
         test_service::runtime::configure(config.directory, &config.public_key_pem)
             .expect("isolated storage");
         let update_feed_url = match &config.mock_response {
@@ -130,6 +143,9 @@ fn run_adapter_thread(
             credential: "test-credential".to_string(),
             base_url: Some(config.check_in_base_url),
             channel: config.channel,
+            attributes: config.attributes.unwrap_or_default(),
+            check_in_interval_ms: config.check_in_interval_ms,
+            debug: config.debug.unwrap_or(false),
             update_feed_url: Some(update_feed_url),
             // Off, unlike the real default -- otherwise a found update
             // races straight past `Available` into downloading within

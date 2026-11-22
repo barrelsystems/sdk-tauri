@@ -89,6 +89,7 @@ impl<R: Runtime> PersistenceWriter<R> {
         });
     }
 
+    #[cfg(any(test, feature = "test-service"))]
     pub async fn wait_for_pending_writes(&self) {
         let revision = self.pending.borrow().as_ref().map_or(0, |job| job.revision);
         let mut completed = self.completed.subscribe();

@@ -32,6 +32,8 @@ pub struct CadenceShared<R: Runtime> {
     pub version_expectation_path: std::path::PathBuf,
     pub host_control: HostControl,
     pub installation_id: String,
+    pub installation_ids: crate::persistence::installation_id::InstallationIdStore<R>,
+    pub installation_id_path: std::path::PathBuf,
     pub config: InitConfig,
     pub sdk_version: String,
     pub log: Box<dyn Fn(&str) + Send + Sync>,
@@ -85,23 +87,39 @@ pub fn start_cadence<R: Runtime>(shared: Arc<CadenceShared<R>>) -> Arc<Notify> {
 
     #[cfg(feature = "test-service")]
     if crate::test_service::runtime::directory().is_some() {
-        return focus_trigger;
+        crate::test_service::resilience_commands::record_interval(jittered_interval_ms);
+        if !crate::test_service::resilience_commands::automatic_cadence() {
+            return focus_trigger;
+        }
     }
 
     let shared_for_loop = shared.clone();
     let focus_trigger_for_loop = focus_trigger.clone();
-    tauri::async_runtime::spawn(async move {
-        tick(&shared_for_loop).await;
-        loop {
-            tokio::select! {
-                _ = tokio::time::sleep(Duration::from_millis(jittered_interval_ms)) => {}
-                _ = focus_trigger_for_loop.notified() => {}
-            }
-            tick(&shared_for_loop).await;
-        }
-    });
+    tauri::async_runtime::spawn(run_schedule(
+        Duration::from_millis(jittered_interval_ms),
+        focus_trigger_for_loop,
+        move || {
+            let shared = shared_for_loop.clone();
+            tauri::async_runtime::spawn(async move {
+                tick(&shared).await;
+            });
+        },
+    ));
 
     focus_trigger
+}
+
+async fn run_schedule(period: Duration, focus: Arc<Notify>, tick: impl Fn() + Send + 'static) {
+    tick();
+    let mut timer = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = timer.tick() => {}
+            _ = focus.notified() => {}
+        }
+        tick();
+    }
 }
 
 /// Resolves `base_url`/`trusted_key_pem`, falling back to the SDK's own
@@ -130,6 +148,10 @@ pub(crate) async fn tick<R: Runtime>(shared: &Arc<CadenceShared<R>>) {
         (shared.log)("cadence: tick skipped, a check-in is already in flight");
         return;
     }
+
+    shared
+        .installation_ids
+        .retry_persistence(&shared.installation_id_path);
 
     let (base_url, trusted_key_pem) =
         resolve_connection_fields(&shared.config, &shared.trusted_keys).await;
@@ -252,6 +274,34 @@ fn policy_holds_the_vendor_check(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn focus_does_not_reset_the_fixed_timer_and_missed_ticks_do_not_burst() {
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let focus = Arc::new(Notify::new());
+        let observed = count.clone();
+        let task = tokio::spawn(run_schedule(
+            Duration::from_secs(100),
+            focus.clone(),
+            move || {
+                observed.fetch_add(1, Ordering::Relaxed);
+            },
+        ));
+        tokio::task::yield_now().await;
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+        tokio::time::advance(Duration::from_secs(40)).await;
+        focus.notify_one();
+        tokio::task::yield_now().await;
+        assert_eq!(count.load(Ordering::Relaxed), 2);
+        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(count.load(Ordering::Relaxed), 3);
+        tokio::time::advance(Duration::from_secs(350)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(count.load(Ordering::Relaxed), 4);
+        task.abort();
+        let _ = task.await;
+    }
 
     fn millis(iso8601: &str) -> i64 {
         parse_iso8601_to_epoch_millis(iso8601).unwrap()

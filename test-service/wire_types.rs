@@ -15,6 +15,14 @@ pub struct Capabilities {
 
 #[derive(Deserialize)]
 pub struct CreateAdapterRequest {
+    pub attributes: Option<std::collections::HashMap<String, String>>,
+    pub debug: Option<bool>,
+    #[serde(rename = "checkInIntervalMs")]
+    pub check_in_interval_ms: Option<u64>,
+    pub lifecycle: Option<bool>,
+    #[serde(rename = "installationPersistence")]
+    pub installation_persistence: Option<String>,
+
     pub channel: Option<String>,
     #[serde(rename = "checkInBaseUrl")]
     pub check_in_base_url: String,
@@ -42,6 +50,14 @@ pub struct JitterFractionRequest {
 #[derive(Deserialize)]
 #[serde(tag = "command")]
 pub enum AdapterCommand {
+    #[serde(rename = "getCadenceState")]
+    GetCadenceState,
+    #[serde(rename = "restoreInstallationPersistence")]
+    RestoreInstallationPersistence,
+    #[serde(rename = "getPersistedInstallationId")]
+    GetPersistedInstallationId,
+    #[serde(rename = "triggerLifecycle")]
+    TriggerLifecycle { event: String },
     #[serde(rename = "setBufferPersistence")]
     SetBufferPersistence {
         mode: tauri_plugin_barrel_kit::test_service::buffer_persistence_control::BufferPersistenceMode,

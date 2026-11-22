@@ -2,4 +2,5 @@
 
 pub mod buffer_commands;
 pub mod buffer_persistence_control;
+pub mod resilience_commands;
 pub mod runtime;

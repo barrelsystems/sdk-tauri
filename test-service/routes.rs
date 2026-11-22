@@ -106,6 +106,11 @@ async fn create_adapter(
         "checkInBaseUrl": payload.check_in_base_url,
         "publicKeyPem": payload.public_key_pem,
         "channel": payload.channel,
+        "attributes": payload.attributes,
+        "debug": payload.debug,
+        "checkInIntervalMs": payload.check_in_interval_ms,
+        "lifecycle": payload.lifecycle,
+        "installationPersistence": payload.installation_persistence,
     })
     .to_string();
 

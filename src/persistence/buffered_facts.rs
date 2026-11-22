@@ -272,6 +272,7 @@ impl<R: Runtime> BufferedFactsStore<R> {
     }
 
     /// Waits only at explicit durability boundaries, never while holding buffer state.
+    #[cfg(any(test, feature = "test-service"))]
     pub async fn wait_for_pending_writes(&self) {
         self.writer.wait_for_pending_writes().await;
     }
