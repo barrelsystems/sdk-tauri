@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Runtime};
 
-use crate::protocol::pre_action_check::Stage;
-use crate::AdapterState;
+use crate::updates::models::state::UpdateState;
+use crate::updates::protocol::pre_action_check::Stage;
 
 static DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
 static ACTIVITY: Mutex<UpdaterActivity> = Mutex::new(UpdaterActivity {
@@ -15,7 +15,7 @@ static ACTIVITY: Mutex<UpdaterActivity> = Mutex::new(UpdaterActivity {
     applies: 0,
 });
 
-/// Calls made to the native updater, independent of Policy decisions.
+/// Calls made to the native updater, independent of update-eligibility decisions.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct UpdaterActivity {
     /// Vendor feed checks.
@@ -54,7 +54,7 @@ pub(crate) fn intercept_install() -> bool {
     true
 }
 
-/// Returns observations without deriving them from a Policy or adapter state.
+/// Returns observations without deriving them from an eligibility decision or update state.
 pub fn activity() -> UpdaterActivity {
     ACTIVITY.lock().unwrap().clone()
 }
@@ -62,20 +62,21 @@ pub fn activity() -> UpdaterActivity {
 /// Awaits the production cadence tick, including its response handler.
 pub async fn check_now<R: Runtime>(app: &AppHandle<R>) {
     if let Some(shared) = crate::shared_for(app) {
-        crate::cadence::tick(&shared).await;
+        crate::updates::cadence::tick(&shared).await;
     }
 }
 
 /// Establishes a vendor fixture before the action under test.
 pub async fn prepare_action<R: Runtime>(app: &AppHandle<R>, stage: Stage) {
     let shared = crate::shared_for(app).expect("SDK initialized");
+    shared.adapter.reset_fixture();
     shared.adapter.check_for_updates(app, &shared.facts).await;
     if matches!(stage, Stage::PreApply) {
         shared.adapter.download_update(&shared.facts).await;
     }
     assert!(matches!(
         shared.adapter.state(),
-        AdapterState::Available { .. } | AdapterState::Downloaded
+        UpdateState::Available { .. } | UpdateState::Downloaded
     ));
 }
 
@@ -83,8 +84,12 @@ pub async fn prepare_action<R: Runtime>(app: &AppHandle<R>, stage: Stage) {
 pub async fn run_action<R: Runtime>(app: &AppHandle<R>, stage: Stage) {
     let shared = crate::shared_for(app).expect("SDK initialized");
     match stage {
-        Stage::PreDownload => crate::perform_download(shared).await,
-        Stage::PreApply => crate::perform_apply(shared).await,
+        Stage::PreDownload => {
+            let _ = crate::updates::perform_download(shared).await;
+        }
+        Stage::PreApply => {
+            let _ = crate::updates::runtime::perform_apply(shared).await;
+        }
     }
 }
 
@@ -93,4 +98,21 @@ pub async fn wait_until_ready<R: Runtime>(app: &AppHandle<R>) {
     while crate::shared_for(app).is_none() {
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
+}
+
+/// Uses the same pure function as the production scheduler.
+pub fn jitter_fraction(installation_id: &str) -> f64 {
+    crate::updates::jitter::compute_jitter_fraction(installation_id)
+}
+
+/// Establishes a prior classified failure through the production adapter.
+pub async fn prepare_updater_failure<R: Runtime>(app: &AppHandle<R>) {
+    let shared = crate::shared_for(app).expect("SDK initialized");
+    let (failure, state) = crate::updates::error_taxonomy::build_failure_state(
+        "tauri-updater",
+        crate::updates::models::failure::UpdateFailureMode::Unknown,
+        crate::updates::models::failure::Phase::Download,
+        "fixture updater failure",
+    );
+    shared.adapter.fail(state, failure);
 }

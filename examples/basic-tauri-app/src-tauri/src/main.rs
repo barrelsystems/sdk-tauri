@@ -1,90 +1,89 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use serde::Serialize;
-use tauri::{AppHandle, Runtime};
-use tauri_plugin_barrel_kit::BarrelKitExt;
+use std::sync::Mutex;
+use tauri::{ipc::Channel, webview::PageLoadEvent, AppHandle, Manager, State, WindowEvent};
+use tauri_plugin_barrel_kit::{updates, BarrelKitExt, InitConfig};
 
-#[derive(Serialize)]
-struct Status {
-    policy: Option<tauri_plugin_barrel_kit::Policy>,
-    last_update_error: Option<tauri_plugin_barrel_kit::UpdateFailure>,
-    adapter_state: Option<tauri_plugin_barrel_kit::AdapterState>,
-}
+type StatusRelay = Mutex<Option<tauri::async_runtime::JoinHandle<()>>>;
 
 #[tauri::command]
-fn barrel_get_status<R: Runtime>(app: AppHandle<R>) -> Status {
-    Status {
-        policy: tauri_plugin_barrel_kit::get_policy(),
-        last_update_error: tauri_plugin_barrel_kit::get_last_update_error(&app),
-        adapter_state: tauri_plugin_barrel_kit::get_adapter_state(&app),
+fn subscribe_updates(
+    app: AppHandle,
+    channel: Channel<updates::Status>,
+    relay: State<'_, StatusRelay>,
+) -> Result<(), String> {
+    let mut receiver = updates::subscribe(&app).ok_or("SDK not registered")?;
+    let mut task = relay.lock().expect("status relay lock poisoned");
+
+    if let Some(previous) = task.take() {
+        previous.abort();
     }
-}
 
-#[tauri::command]
-fn barrel_apply_update<R: Runtime>(app: AppHandle<R>) {
-    tauri_plugin_barrel_kit::apply_update(&app);
-}
-
-#[tauri::command]
-fn barrel_download_update<R: Runtime>(app: AppHandle<R>) {
-    tauri_plugin_barrel_kit::download_update(&app);
-}
-
-// No Playwright-equivalent driver exists for Tauri's webview, so this
-// auto-triggers the download itself and reports every transition via the
-// same `[barrel-kit] adapterState: ` stdout-marker pattern this SDK's
-// Swift sibling's own example app uses.
-fn watch_and_auto_download<R: Runtime>(app: &AppHandle<R>) {
-    let handle = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let Some(mut receiver) = tauri_plugin_barrel_kit::subscribe_adapter_state(&handle) else {
-            eprintln!("[barrel-kit] subscribe_adapter_state() returned None in setup");
-            return;
-        };
+    *task = Some(tauri::async_runtime::spawn(async move {
         loop {
-            let state = receiver.borrow_and_update().clone();
+            let status = receiver.borrow_and_update().clone();
             println!(
-                "[barrel-kit] adapterState: {}",
-                serde_json::to_string(&state).unwrap_or_default()
+                "[barrel-kit] lifecycleState: {}",
+                serde_json::to_string(&status.state).unwrap_or_default()
             );
-            if matches!(
-                state,
-                tauri_plugin_barrel_kit::AdapterState::Available { .. }
-            ) {
-                tauri_plugin_barrel_kit::download_update(&handle);
-            }
-            if receiver.changed().await.is_err() {
+            if channel.send(status).is_err() || receiver.changed().await.is_err() {
                 break;
             }
         }
-    });
+    }));
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn apply_update(app: AppHandle) -> Result<(), updates::ActionError> {
+    updates::apply(&app).await
+}
+
+fn stop_relay(app: &AppHandle) {
+    let task = app
+        .state::<StatusRelay>()
+        .lock()
+        .expect("status relay lock poisoned")
+        .take();
+
+    if let Some(task) = task {
+        task.abort();
+    }
 }
 
 fn main() {
+    let mut context = tauri::generate_context!();
+
+    if let Ok(identifier) = std::env::var("BARREL_TEST_APPLICATION_ID") {
+        context.config_mut().identifier = identifier;
+    }
+
     tauri::Builder::default()
-        .barrel_kit(tauri_plugin_barrel_kit::InitConfig {
+        .manage(StatusRelay::default())
+        .invoke_handler(tauri::generate_handler![
+            subscribe_updates,
+            apply_update
+        ])
+        .barrel_kit(InitConfig {
             credential: std::env::var("BARREL_CREDENTIAL").unwrap_or_default(),
             base_url: std::env::var("BARREL_BASE_URL").ok(),
-            update_feed_url: std::env::var("BARREL_UPDATE_FEED_URL").ok(),
             debug: true,
-            // Stops at `Available`: this unsigned dev build has no real
-            // artifact to install. `watch_and_auto_download` below still
-            // exercises the manual trigger, as a real `auto_download: false` host would.
-            auto_download: Some(false),
-            check_in_interval_ms: None,
-            channel: None,
-            attributes: Default::default(),
-            hold_cache_max_age_ms: None,
+            updates: updates::Config {
+                update_feed_url: std::env::var("BARREL_UPDATE_FEED_URL").ok(),
+                ..Default::default()
+            },
         })
-        .invoke_handler(tauri::generate_handler![
-            barrel_get_status,
-            barrel_apply_update,
-            barrel_download_update
-        ])
-        .setup(|app| {
-            watch_and_auto_download(app.handle());
-            Ok(())
+        .on_page_load(|webview, payload| {
+            if webview.label() == "main" && matches!(payload.event(), PageLoadEvent::Started) {
+                stop_relay(webview.app_handle());
+            }
         })
-        .run(tauri::generate_context!())
+        .on_window_event(|window, event| {
+            if window.label() == "main" && matches!(event, WindowEvent::Destroyed) {
+                stop_relay(window.app_handle());
+            }
+        })
+        .run(context)
         .expect("error while running the Barrel Tauri example");
 }

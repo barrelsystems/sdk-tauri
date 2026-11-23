@@ -1,0 +1,12 @@
+{
+  "identifier": "main",
+  "description": "Update status and controls for the main application window.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "allow-subscribe-updates",
+    "allow-apply-update"
+  ]
+}

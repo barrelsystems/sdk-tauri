@@ -1,30 +1,28 @@
 <!doctype html>
-<html>
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <title>Barrel SDK — Tauri Example</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Software update</title>
     <link rel="stylesheet" href="index.css" />
   </head>
   <body>
     <main>
-      <svg class="logomark" viewBox="0 0 16 16" aria-label="Barrel">
+      <svg class="logomark" viewBox="0 0 16 16" aria-hidden="true">
         <rect x="4" y="1" width="8" height="2" />
         <rect x="4" y="4" width="8" height="3" />
         <rect x="4" y="8" width="8" height="3" />
         <rect x="4" y="12" width="8" height="3" />
       </svg>
-      <h1>Barrel SDK Example</h1>
-      <p class="subtitle">Packaged with Tauri</p>
-      <section>
-        <h2>Policy</h2>
-        <p id="policy">Waiting for first check-in…</p>
-      </section>
-      <section>
-        <h2>Last update error</h2>
-        <p id="error">None this session</p>
-      </section>
-      <button id="download-update" type="button">Download update</button>
-      <button id="apply-update" type="button">Apply update</button>
+      <h1>Software update</h1>
+      <p id="update-state" role="status">Updates run in the background.</p>
+      <progress
+        id="update-progress"
+        max="100"
+        aria-label="Update download progress"
+        hidden
+      ></progress>
+      <button id="apply-update" type="button" hidden>Restart to update</button>
     </main>
     <script type="module" src="main.js"></script>
   </body>

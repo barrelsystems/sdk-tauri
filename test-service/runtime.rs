@@ -3,7 +3,6 @@
 //! is neither `Send` nor `Sync`).
 
 use std::io::Write;
-use std::time::Duration;
 
 use axum::routing::post;
 use axum::Router;
@@ -11,18 +10,14 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use serde::Deserialize;
 use tauri::test::mock_builder;
-use tauri_plugin_barrel_kit::protocol::pre_action_check::Stage;
 use tauri_plugin_barrel_kit::test_service;
-use tauri_plugin_barrel_kit::{
-    get_adapter_state, get_last_update_error, subscribe_adapter_state, AdapterState, BarrelKitExt,
-    InitConfig, UpdateFailure,
-};
+use tauri_plugin_barrel_kit::updates::protocol::pre_action_check::Stage;
+use tauri_plugin_barrel_kit::updates::{self, Failure, State};
+use tauri_plugin_barrel_kit::{BarrelKitExt, InitConfig};
 
-use crate::mock_update_server::{MockResponse, MockUpdateServer};
+use crate::mock_update_server::MockUpdateServer;
 
-/// Decoded from `WORKER_ENV_VAR`'s JSON -- the worker's own mock-update
-/// variant plus the check-in `baseUrl`/`publicKeyPem` every adapter now
-/// always carries, regardless of whether a `variant` was also given.
+/// Isolated worker settings supplied by the service HTTP endpoint.
 #[derive(Deserialize)]
 struct WorkerConfig {
     attributes: Option<std::collections::HashMap<String, String>>,
@@ -35,8 +30,6 @@ struct WorkerConfig {
 
     channel: Option<String>,
     directory: std::path::PathBuf,
-    #[serde(rename = "mockResponse")]
-    mock_response: MockResponse,
     #[serde(rename = "checkInBaseUrl")]
     check_in_base_url: String,
     #[serde(rename = "publicKeyPem")]
@@ -72,10 +65,8 @@ fn fixed_signing_key() -> minisign::SecretKey {
 /// thread that owns the real adapter -- distinct from `AdapterCommand`,
 /// which is the wire-level shape a request body decodes into.
 pub(crate) enum ThreadRequest {
-    GetState(tokio::sync::oneshot::Sender<Option<AdapterState>>),
-    GetLastError(tokio::sync::oneshot::Sender<Option<UpdateFailure>>),
-    TriggerDownload(tokio::sync::oneshot::Sender<Option<AdapterState>>),
-    StartDownload(tokio::sync::oneshot::Sender<Option<AdapterState>>),
+    GetState(tokio::sync::oneshot::Sender<Option<State>>),
+    GetLastError(tokio::sync::oneshot::Sender<Option<Failure>>),
     PrepareAction {
         stage: Stage,
         reply: tokio::sync::oneshot::Sender<()>,
@@ -131,27 +122,21 @@ fn run_adapter_thread(
         }
         test_service::runtime::configure(config.directory, &config.public_key_pem)
             .expect("isolated storage");
-        let update_feed_url = match &config.mock_response {
-            MockResponse::ConnectionRefused => Some("http://127.0.0.1:1/unreachable".to_string()),
-            MockResponse::InvalidFeedUrl => Some("not a valid url at all".to_string()),
-            _ => None,
-        };
-        let mock_server = MockUpdateServer::start(config.mock_response, signing_key).await;
-        let update_feed_url = update_feed_url.unwrap_or_else(|| mock_server.update_url());
+        let mock_server = MockUpdateServer::start(signing_key).await;
+        let update_feed_url = mock_server.update_url();
 
         let config = InitConfig {
-            credential: "test-credential".to_string(),
+            credential: "test-service".to_string(),
             base_url: Some(config.check_in_base_url),
-            channel: config.channel,
-            attributes: config.attributes.unwrap_or_default(),
-            check_in_interval_ms: config.check_in_interval_ms,
             debug: config.debug.unwrap_or(false),
-            update_feed_url: Some(update_feed_url),
-            // Off, unlike the real default -- otherwise a found update
-            // races straight past `Available` into downloading within
-            // the same tick, before a scenario can observe it stable.
-            auto_download: Some(false),
-            ..Default::default()
+            updates: tauri_plugin_barrel_kit::updates::Config {
+                channel: config.channel,
+                attributes: config.attributes.unwrap_or_default(),
+                check_in_interval_ms: config.check_in_interval_ms,
+                update_feed_url: Some(update_feed_url),
+                auto_download: Some(false),
+                ..Default::default()
+            },
         };
 
         let builder = mock_builder().barrel_kit(config);
@@ -159,11 +144,7 @@ fn run_adapter_thread(
             .build(crate::test_context())
             .expect("mock app builds");
 
-        let mut state_rx = subscribe_until_available(app.handle()).await;
-        // Marks the pre-trigger value "seen" so `wait_until_settled`'s own
-        // `changed()` check can tell "already settled" apart from "hasn't
-        // moved yet", even if the real transition circles back to this value.
-        state_rx.borrow_and_update();
+        test_service::runtime::wait_until_ready(app.handle()).await;
         let _ = ready_tx.send(app.handle().clone());
 
         while let Some(request) = request_rx.recv().await {
@@ -174,25 +155,10 @@ fn run_adapter_thread(
                     let _ = reply.send(());
                 }
                 ThreadRequest::GetState(reply) => {
-                    let _ = reply.send(get_adapter_state(app.handle()));
+                    let _ = reply.send(snapshot(app.handle()).map(|status| status.state));
                 }
                 ThreadRequest::GetLastError(reply) => {
-                    let _ = reply.send(get_last_update_error(app.handle()));
-                }
-                ThreadRequest::TriggerDownload(reply) => {
-                    state_rx.borrow_and_update();
-                    tauri_plugin_barrel_kit::download_update(app.handle());
-                    wait_until_settled(&mut state_rx).await;
-                    let _ = reply.send(get_adapter_state(app.handle()));
-                }
-                // Replies as soon as the download starts, not once it
-                // settles -- lets a scenario poll `getAdapterState`
-                // afterward and observe `Downloading`/`progress` for real.
-                ThreadRequest::StartDownload(reply) => {
-                    state_rx.borrow_and_update();
-                    tauri_plugin_barrel_kit::download_update(app.handle());
-                    let _ = state_rx.changed().await;
-                    let _ = reply.send(get_adapter_state(app.handle()));
+                    let _ = reply.send(snapshot(app.handle()).and_then(|status| status.last_error));
                 }
             }
         }
@@ -202,36 +168,7 @@ fn run_adapter_thread(
     });
 }
 
-/// The plugin's `setup` hook registers the adapter on a separately
-/// spawned task, so a subscribe attempt right after `build()` can still
-/// be too early -- retried until it succeeds.
-async fn subscribe_until_available(
-    handle: &tauri::AppHandle<tauri::test::MockRuntime>,
-) -> tokio::sync::watch::Receiver<AdapterState> {
-    loop {
-        if let Some(receiver) = subscribe_adapter_state(handle) {
-            return receiver;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-}
-
-/// Waits past any transitional state (`Checking`/`Downloading`) to the
-/// next stable one. The caller must have already marked the pre-trigger
-/// value "seen" via `borrow_and_update` -- see `run_adapter_thread`.
-async fn wait_until_settled(state_rx: &mut tokio::sync::watch::Receiver<AdapterState>) {
-    let in_transit =
-        |s: &AdapterState| matches!(s, AdapterState::Checking | AdapterState::Downloading { .. });
-
-    let _ = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if state_rx.changed().await.is_err() {
-                return;
-            }
-            if !in_transit(&state_rx.borrow_and_update()) {
-                return;
-            }
-        }
-    })
-    .await;
+/// Reads the initial public subscription value for conformance inspection.
+pub(crate) fn snapshot<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<updates::Status> {
+    updates::subscribe(app).map(|receiver| receiver.borrow().clone())
 }

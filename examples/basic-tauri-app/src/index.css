@@ -1,79 +1,57 @@
-/* Colors below are Barrel's real product tokens (packages/design/tokens in
-   the infrastructure repo) -- hand-copied here rather than imported, since
-   this is a standalone public example with no dependency on that repo. */
 body {
-  font-family:
-    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
-    sans-serif;
   margin: 0;
   min-height: 100vh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  display: grid;
+  place-items: center;
   background: #080d0c;
   color: #f4f5f4;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
 main {
-  width: 100%;
-  max-width: 28rem;
-  padding: 2rem;
+  max-width: 24rem;
+  padding: 3rem;
   text-align: center;
 }
-
 .logomark {
-  width: 2.5rem;
-  height: 2.5rem;
-  fill: #f9fafb;
+  width: 2rem;
+  height: 2rem;
+  fill: currentColor;
   margin-bottom: 1.5rem;
 }
-
 h1 {
-  margin: 0 0 0.25rem;
   font-size: 1.25rem;
   font-weight: 600;
-}
-
-.subtitle {
-  margin: 0 0 2rem;
-  color: #b1b5b4;
-  font-size: 0.9rem;
-}
-
-section {
-  border: 1px solid #282d2c;
-  background: #0c1111;
-  border-radius: 0.5rem;
-  padding: 1rem 1.25rem;
-  margin-bottom: 1rem;
-  text-align: left;
-}
-
-section h2 {
-  margin: 0 0 0.5rem;
-  font-size: 0.75rem;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: #b1b5b4;
-}
-
-section p {
   margin: 0;
-  font-size: 0.95rem;
-  color: #f4f5f4;
 }
-
-button {
+p {
+  color: #b1b5b4;
   font-size: 0.9rem;
-  font-weight: 500;
-  padding: 0.6rem 1.25rem;
-  border-radius: 0.375rem;
-  border: none;
+  line-height: 1.5;
+  margin: 0.75rem 0 0;
+}
+progress {
+  width: 100%;
+  height: 0.4rem;
+  margin-top: 1.5rem;
+  accent-color: #fbf5e9;
+}
+button {
+  margin-top: 1.5rem;
+  padding: 0.65rem 1.1rem;
+  border: 0;
+  border-radius: 0.5rem;
   background: #fbf5e9;
   color: #080d0c;
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 500;
   cursor: pointer;
 }
-
-button:hover {
-  opacity: 0.9;
+button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+[hidden] {
+  display: none;
 }

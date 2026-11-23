@@ -1,23 +1,32 @@
 use std::path::Path;
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_store::StoreExt;
 
-/// A single key-value JSON file, backed by `tauri-plugin-store`. Every
-/// async read/write runs on a blocking-pool thread, since the plugin's
-/// own store calls are synchronous -- `write_sync` is the one exception.
+pub(crate) struct StorageDirectory(pub Option<std::path::PathBuf>);
+
+/// Async store operations run on a blocking thread; only process exit
+/// uses synchronous I/O. Unavailable storage keeps the runtime memory-only.
 pub struct DiskStore<R: Runtime> {
     app: AppHandle<R>,
+    persistent: bool,
 }
 
 impl<R: Runtime> DiskStore<R> {
     pub fn new(app: AppHandle<R>) -> Self {
-        Self { app }
+        let persistent = app
+            .try_state::<StorageDirectory>()
+            .is_none_or(|directory| directory.0.is_some());
+        Self { app, persistent }
     }
 
     /// Reads `key` from the store at `path`. Always reloads from disk
     /// first, so this never serves a stale cached value -- the only read
     /// path these stores have. `None` on any failure.
     pub async fn read(&self, path: &Path, key: &str) -> Option<serde_json::Value> {
+        if !self.persistent {
+            return None;
+        }
+
         let app = self.app.clone();
         let path = path.to_path_buf();
         let key = key.to_string();
@@ -31,8 +40,12 @@ impl<R: Runtime> DiskStore<R> {
     }
 
     /// Writes `key` -> `value` and saves immediately. Fails open:
-    /// swallows every error, same as the code this replaces.
+    /// memory remains authoritative when saving fails.
     pub async fn write(&self, path: &Path, key: &str, value: serde_json::Value) {
+        if !self.persistent {
+            return;
+        }
+
         let app = self.app.clone();
         let path = path.to_path_buf();
         let key = key.to_string();
@@ -47,6 +60,10 @@ impl<R: Runtime> DiskStore<R> {
     /// The synchronous counterpart to `write`, for the one call site that
     /// can't `.await` (`RunEvent::Exit`). Fails open, same as `write`.
     pub fn write_sync(&self, path: &Path, key: &str, value: serde_json::Value) {
+        if !self.persistent {
+            return;
+        }
+
         let Ok(store) = self.app.store_builder(path).disable_auto_save().build() else {
             return;
         };
@@ -58,8 +75,23 @@ impl<R: Runtime> DiskStore<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::persistence::test_support::mock_app;
+    use crate::updates::persistence::test_support::mock_app;
     use tempfile::NamedTempFile;
+
+    #[tokio::test]
+    async fn unavailable_storage_preserves_one_in_memory_installation_without_writing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("installation.json");
+        let app = mock_app();
+        app.manage(StorageDirectory(None));
+        let store = crate::updates::persistence::installation_id::InstallationIdStore::new(
+            app.handle().clone(),
+        );
+        let first = store.get_or_create(&path).await;
+
+        assert_eq!(store.get_or_create(&path).await, first);
+        assert!(!path.exists());
+    }
 
     #[tokio::test]
     async fn persists_and_the_write_is_readable_back() {

@@ -1,9 +1,11 @@
 use serde::Serialize;
 use std::time::Duration;
 
-use super::policy::verify_and_parse_policy;
 use super::protocol_request::{post_protocol_request, PostProtocolRequestParams};
-use crate::types::{BackendConnection, Policy, PROTOCOL_VERSION};
+use super::update_eligibility_verification::verify_and_parse_update_eligibility;
+use crate::updates::models::eligibility::UpdateEligibility;
+use crate::updates::protocol::wire_types::BackendConnection;
+use crate::updates::protocol::wire_types::PROTOCOL_VERSION;
 
 const PRE_ACTION_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -38,12 +40,12 @@ struct PreActionCheckBody<'a> {
 
 /// Asks whether it's still safe to act right now -- narrower than a full
 /// check-in, no state sync. Any failure fails open: the caller proceeds
-/// exactly as it would under a `current` Policy.
+/// exactly as it would under an `unrestricted` eligibility decision.
 pub async fn check_pre_action(
     client: &reqwest::Client,
     params: PreActionCheckParams<'_>,
     log: &(impl Fn(&str) + ?Sized),
-) -> Option<Policy> {
+) -> Option<UpdateEligibility> {
     let body = PreActionCheckBody {
         protocol_version: PROTOCOL_VERSION,
         installation_id: params.connection.installation_id,
@@ -64,5 +66,5 @@ pub async fn check_pre_action(
     )
     .await?;
 
-    verify_and_parse_policy(&parsed, params.trusted_key_pem)
+    verify_and_parse_update_eligibility(&parsed, params.trusted_key_pem)
 }

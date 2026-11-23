@@ -1,7 +1,6 @@
 use std::fmt;
 
-/// Returned synchronously by `init()`, and only by `init()` -- every later
-/// failure fails open instead.
+/// Invalid initialization settings that the application can correct.
 #[derive(Debug)]
 pub struct BarrelConfigError(String);
 

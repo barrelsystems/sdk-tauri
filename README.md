@@ -1,102 +1,120 @@
-# tauri-plugin-barrel-kit
+# Barrel for Tauri
 
-Barrel's release-intelligence SDK for Tauri apps. It wraps
-`tauri-plugin-updater` and reports what actually happened on a check,
-download, or install. It doesn't replace your updater or touch your
-binaries — your release feed stays on your own infrastructure.
+Release reporting and update eligibility for Tauri applications on macOS, Windows and Linux. Requires Tauri 2.
 
 ## Install
 
+There is no tagged release yet. Install from source:
+
 ```sh
-cargo add tauri-plugin-barrel-kit
+cargo add tauri-plugin-barrel-kit --git https://github.com/barrelsystems/sdk-tauri --branch master
 ```
 
-## Use it
+## Quick start
 
 ```rust
-use tauri_plugin_barrel_kit::BarrelKitExt;
+use tauri_plugin_barrel_kit::{BarrelKitExt, InitConfig, updates};
 
-tauri::Builder::default()
-    .barrel_kit(tauri_plugin_barrel_kit::InitConfig {
-        credential: std::env::var("BARREL_CREDENTIAL").unwrap(),
-        update_feed_url: std::env::var("BARREL_UPDATE_FEED_URL").ok(), // omit to use tauri.conf.json's own static endpoints
-        ..Default::default()
-    })
-    .run(tauri::generate_context!())
-    .expect("error while running the app");
-
-// later, anywhere you have an AppHandle:
-let policy = tauri_plugin_barrel_kit::get_policy(); // Option<Policy>
-let state = tauri_plugin_barrel_kit::get_adapter_state(&app); // Option<AdapterState>
-let last_error = tauri_plugin_barrel_kit::get_last_update_error(&app); // Option<UpdateFailure>
-
-// subscribe instead of polling:
-if let Some(mut rx) = tauri_plugin_barrel_kit::subscribe_adapter_state(&app) {
-    tauri::async_runtime::spawn(async move {
-        while rx.changed().await.is_ok() {
-            let state = rx.borrow_and_update().clone();
-            // re-render on every transition
-        }
-    });
+fn main() -> tauri::Result<()> {
+    tauri::Builder::default()
+        .barrel_kit(InitConfig {
+            credential: "your-project-sdk-credential".into(),
+            updates: updates::Config { auto_download: Some(false), ..Default::default() },
+            ..Default::default()
+        })
+        .run(tauri::generate_context!())
 }
-
-tauri_plugin_barrel_kit::download_update(&app); // manual trigger, needed only with auto_download: false
-tauri_plugin_barrel_kit::apply_update(&app); // host-triggered install, ahead of the natural quit-time default
 ```
 
-That's the whole surface. Setup runs inside the plugin's own setup hook and
-fails open after that: a network blip or a bad signature from us never
-blocks an update on your end.
+With an initialized `AppHandle` named `app`:
+
+```rust
+let mut subscription = updates::subscribe(&app).ok_or("plugin not registered")?;
+loop {
+    let status = subscription.borrow_and_update().clone();
+    // Render the complete initial snapshot and subsequent changes.
+    render_status(status);
+    if subscription.changed().await.is_err() { break; }
+}
+```
+
+From application action handlers:
+
+```rust
+updates::download(&app).await?;
+updates::apply(&app).await?;
+```
+
+## Application UI
+
+The SDK is a Rust utility. Menus, background tasks and other native code can use
+`updates::subscribe`, `updates::download` and `updates::apply` directly. No webview
+or frontend package is required.
+
+The [example](examples/README.md) shows the framework transport explicitly:
+application-owned Tauri commands call the Rust utility, a native `Channel` forwards
+subscription snapshots, and the webview uses `invoke` to request installation.
+The SDK itself exports no frontend bridge or commands.
+
+## Configuration
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `credential` | Required | Project SDK credential. |
+| `base_url` | Barrel endpoint | Reporting endpoint override for development. |
+| `debug` | `false` | Diagnostic logging. |
+| `updates` | Defaults below | Update-specific configuration. |
+
+Fields inside `updates`:
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `check_in_interval_ms` | 30 minutes | Nominal cadence in milliseconds, clamped to 15 minutes–2 hours. |
+| `channel` | `"stable"` | Observed release track. |
+| `attributes` | Empty | String attributes included in reporting. |
+| `auto_download` | `true` | Download available updates automatically. |
+| `update_feed_url` | Updater configuration | Override the release feed. |
+| `artifact_public_key` | Updater configuration | Verify release artifacts with this public key; not an eligibility key. |
+| `hold_cache_max_age_ms` | 24 hours | Cached Hold lifetime in milliseconds; maximum seven days. |
+
+## Update controls
+
+Status contains `state`, `eligibility`, and `last_error`. Subscriptions receive a
+complete initial snapshot and subsequent snapshots; intermediate transitions may
+coalesce. Subscriptions are `tokio::sync::watch` receivers; drop a receiver to unsubscribe.
+Subscriptions return `None` when the plugin is absent. Registered plugins
+publish an initial idle snapshot before asynchronous setup completes. Read the
+receiver’s current value before awaiting `changed()`; no separate getter is needed.
+The example forwards this native stream to its webview using a Tauri channel.
+
+Manual download completes after verified download. Manual apply completes at
+installer handoff if the process survives long enough to return; it cannot confirm
+a successful relaunch. Commands report classified errors for an unready SDK,
+invalid state, a concurrent action, Hold, cancellation, or native failure.
+Background reporting remains fail open.
+
+Manual commands return `Result<(), updates::ActionError>`. Barrel registers the
+updater and storage plugins; do not register them twice. Feed/signing overrides
+fall back to your existing updater configuration when omitted.
 
 ## Behavior
 
-Checks in on launch, then every 30 minutes (15-minute floor), jittered per
-install, plus on window focus. Every Policy response is verified with
-`ed25519-dalek`; a failed verification just keeps the last good Policy
-around instead of erroring out.
+- Reporting, verification failures, and unavailable storage fail open. A previously
+  verified Hold remains effective within its configured cache lifetime.
+- Downloads run automatically by default. A fresh verified Hold can defer a
+  download or installation; it never prevents an ordinary application quit.
+- Your application owns its release feed and artifacts. The native updater
+  verifies artifacts and installs them; Barrel verifies eligibility decisions.
+- Reports version, operating system, architecture, update state/errors, channel,
+  configured attributes, and a locally generated installation identifier.
+- `channel` is an observed, case-sensitive release track; it does not select a feed.
+  Attributes are limited to 20 keys and 256 UTF-8 bytes per value.
+- Debug logging is disabled by default. Reporting is best effort.
 
-Every check-in reports the channel key in `InitConfig.channel` verbatim
-(default: `"stable"`), without changing the updater's feed. Keys are
-case-sensitive; use the configured key rather than its display name.
+## Examples and support
 
-Facts recorded while offline get buffered to disk and flushed on the next
-successful check-in. Repeats get merged rather than duplicated, and if the
-buffer fills up, the oldest non-terminal entry gets dropped first. Downloads
-and installs both re-check Policy immediately beforehand, not just on the
-30-minute cadence, so a Hold placed in between still has time to land.
+- [Tauri example](examples/basic-tauri-app)
+- [Report a problem](https://github.com/barrelsystems/sdk-tauri/issues)
 
-Updates download automatically once found. Set `auto_download: false` in
-`InitConfig` and call `download_update(&app)` yourself if you'd rather
-control the timing. The plugin's feed URL gets fully wrapped too — pass
-`update_feed_url` to override `tauri.conf.json`'s static endpoints at
-runtime, or leave it unset to use whatever's already there.
-
-`AdapterState` reports the real lifecycle
-(`idle`/`checking`/`available`/`downloading`/`downloaded`/`failed`), and any
-failure classifies into one `failureMode` shared across every Barrel SDK —
-pull it with `get_last_update_error()` or subscribe live with
-`subscribe_adapter_state()`. Release notes come through on
-`AdapterState::Available.release_notes` when the feed has any, `None` when
-it doesn't.
-
-A few smaller things: the SDK supports server-directed rotation of the
-trust key it ships with, keeps a random installation ID on disk, and bounds
-whatever custom attributes you attach so a bug in your own code can't
-balloon a check-in past what we'll accept. Debug logging is off unless you
-set `debug: true`, in which case it goes to `eprintln!`.
-
-## What stays yours
-
-Targeting and rollout live on Barrel's dashboard. The feed itself and
-whatever binaries it serves are yours; `update_feed_url` just points at them.
-
-## Dependencies
-
-`tauri` + `tauri-plugin-updater` (the thing being wrapped), `serde`/`serde_json`
-for the wire protocol, `reqwest` with `rustls-tls`, `tokio` (already a
-`tauri` dependency), `ed25519-dalek`/`pkcs8`/`base64` for signatures, `uuid`
-for installation IDs. `url` comes in free via `tauri-plugin-updater`'s own
-tree. Everything here ships inside your binary, so we keep this list short
-on purpose.
-
-Source ownership is described in [Architecture](docs/architecture.md).
+See the [example data flow](examples/README.md) for native subscriptions, transport
+and renderer button handling.

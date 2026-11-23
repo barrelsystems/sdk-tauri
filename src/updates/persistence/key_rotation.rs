@@ -7,10 +7,10 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use pkcs8::DecodePublicKey;
 
 use super::disk_store::DiskStore;
-use crate::types::CheckInResponse;
+use crate::updates::protocol::wire_types::CheckInResponse;
 
 /// Resolves, and -- when a signed rotation announcement arrives -- updates,
-/// the Ed25519 public key this SDK verifies Policy responses against.
+/// the Ed25519 public key this SDK verifies update-eligibility responses against.
 pub struct TrustedKeyStore<R: Runtime> {
     cached: Mutex<Option<String>>,
     disk: DiskStore<R>,
@@ -26,7 +26,7 @@ impl<R: Runtime> TrustedKeyStore<R> {
 
     /// Reads a previously-adopted rotation cached on disk, or falls back to
     /// the build-time default. Call once at startup, before the first
-    /// check-in's Policy is verified.
+    /// check-in's update eligibility is verified.
     pub async fn get_or_create(&self, path: &Path, built_in_key_pem: &str) -> String {
         let mut cached = self.cached.lock().await;
         if let Some(key) = cached.as_ref() {
@@ -107,7 +107,7 @@ fn verify_rotation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::persistence::test_support::mock_app;
+    use crate::updates::persistence::test_support::mock_app;
     use ed25519_dalek::{Signer, SigningKey};
     use pkcs8::EncodePublicKey;
     use tempfile::NamedTempFile;
@@ -129,8 +129,8 @@ mod tests {
         next_public_key_signature: Option<String>,
     ) -> CheckInResponse {
         CheckInResponse {
-            protocol_version: crate::types::PROTOCOL_VERSION,
-            policy: "{}".to_string(),
+            protocol_version: crate::updates::protocol::wire_types::PROTOCOL_VERSION,
+            update_eligibility: "{}".to_string(),
             signature: "sig".to_string(),
             next_public_key_pem,
             next_public_key_signature,

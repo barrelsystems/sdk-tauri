@@ -170,18 +170,18 @@ async fn native_download_callbacks_report_only_real_progress_and_verified_comple
         let facts = BufferedFactsStore::new(app.handle().clone());
         let adapter = Adapter::new();
         adapter.set_feed_url(feed.url.clone());
-        assert_eq!(adapter.state(), AdapterState::Idle);
+        assert_eq!(adapter.state(), UpdateState::Idle);
         assert!(adapter.last_error().is_none());
 
         adapter.check_for_updates(app.handle(), &facts).await;
         assert_eq!(
             adapter.state(),
-            AdapterState::Available {
+            UpdateState::Available {
                 release_notes: Some("Native notes".into())
             }
         );
         assert_eq!(adapter.target_version().await.as_deref(), Some("99.0.0"));
-        let mut states = adapter.subscribe_state();
+        let mut states = adapter.subscribe_reportable_state();
         let download = adapter.download_update(&facts);
         let observe = async {
             let mut progress_values = Vec::new();
@@ -189,9 +189,9 @@ async fn native_download_callbacks_report_only_real_progress_and_verified_comple
                 states.changed().await.unwrap();
                 let state = states.borrow_and_update().clone();
                 match state {
-                    AdapterState::Downloading { progress } => progress_values.push(progress),
-                    AdapterState::Downloaded => break,
-                    AdapterState::Failed { .. } => {
+                    UpdateState::Downloading { progress } => progress_values.push(progress),
+                    UpdateState::Downloaded => break,
+                    UpdateState::Failed { .. } => {
                         panic!("download failed: {:?}", adapter.last_error())
                     }
                     _ => {}
@@ -214,7 +214,18 @@ async fn native_download_callbacks_report_only_real_progress_and_verified_comple
         } else {
             assert!(progress.iter().all(Option::is_none));
         }
-        assert_eq!(adapter.state(), AdapterState::Downloaded);
+        let recorded = facts.snapshot().await;
+        assert_eq!(
+            recorded.iter().any(|fact| matches!(
+                fact,
+                crate::updates::persistence::buffered_facts::BufferedFact::LifecycleState {
+                    state: UpdateState::Downloading { progress: Some(_) },
+                    ..
+                }
+            )),
+            known_length
+        );
+        assert_eq!(adapter.state(), UpdateState::Downloaded);
         assert!(adapter.last_error().is_none());
     }
 }
@@ -238,13 +249,13 @@ async fn receiving_all_bytes_does_not_mark_an_unverified_download_as_downloaded(
     assert_eq!(failure.phase, Phase::Verify);
     assert_eq!(failure.platform, "tauri-updater");
     assert_eq!(failure.platform_code, "Base64");
-    assert!(matches!(adapter.state(), AdapterState::Failed { .. }));
+    assert!(matches!(adapter.state(), UpdateState::Failed { .. }));
     let snapshot = facts.snapshot().await;
     assert!(
         !snapshot.iter().any(|fact| matches!(
             fact,
-            crate::persistence::buffered_facts::BufferedFact::AdapterState {
-                state: AdapterState::Downloaded,
+            crate::updates::persistence::buffered_facts::BufferedFact::LifecycleState {
+                state: UpdateState::Downloaded,
                 ..
             }
         )),
@@ -271,7 +282,7 @@ async fn a_normal_no_update_cycle_is_idle_and_keeps_the_last_failure() {
 
     adapter.check_for_updates(app.handle(), &facts).await;
 
-    assert_eq!(adapter.state(), AdapterState::Idle);
+    assert_eq!(adapter.state(), UpdateState::Idle);
     assert_eq!(
         adapter.last_error().unwrap().platform_code,
         failure.platform_code
@@ -281,19 +292,23 @@ async fn a_normal_no_update_cycle_is_idle_and_keeps_the_last_failure() {
         .await
         .into_iter()
         .filter_map(|fact| match fact {
-            crate::persistence::buffered_facts::BufferedFact::AdapterState { state, .. } => {
-                Some(state)
-            }
+            crate::updates::persistence::buffered_facts::BufferedFact::LifecycleState {
+                state,
+                ..
+            } => Some(state),
             _ => None,
         })
         .collect();
-    assert_eq!(states.last(), Some(&AdapterState::Idle));
+    assert_eq!(states.last(), Some(&UpdateState::Idle));
+    // `Checking` is local SDK activity, never a fact the backend learns
+    // about -- not even via the buffered-facts history, despite two
+    // `check_for_updates` calls each passing through it.
     assert_eq!(
         states
             .iter()
-            .filter(|state| **state == AdapterState::Checking)
+            .filter(|state| **state == UpdateState::Checking)
             .count(),
-        2
+        0
     );
 }
 
@@ -318,8 +333,8 @@ async fn a_native_check_failure_reports_its_real_identifier_and_phase() {
     assert_eq!(failure.platform, "tauri-updater");
     assert_eq!(
         adapter.state(),
-        AdapterState::Failed {
-            category: crate::types::FailureCategory::Check,
+        UpdateState::Failed {
+            category: crate::updates::models::failure::FailureCategory::Check,
             code: UpdateFailureMode::ManifestUnreachable,
             platform_code: "ReleaseNotFound".into(),
         }

@@ -1,39 +1,39 @@
-const { invoke } = window.__TAURI__.core;
+const { Channel, invoke } = window.__TAURI__.core;
 
-const policyEl = document.querySelector("#policy");
-const errorEl = document.querySelector("#error");
-const applyButton = document.querySelector("#apply-update");
-const downloadButton = document.querySelector("#download-update");
+const message = document.querySelector("#update-state");
+const progress = document.querySelector("#update-progress");
+const restart = document.querySelector("#apply-update");
 
-function describePolicy(policy) {
-  if (!policy) return "Waiting for first check-in…";
-  switch (policy.type) {
-    case "current":
-      return `Current (environment: ${policy.environment}, issued ${policy.issuedAt})`;
-    case "held":
-      return `Held${policy.reason ? ` — ${policy.reason}` : ""} (environment: ${policy.environment})`;
-    case "updateEligible":
-      return `Update eligible${policy.priority ? ` (${policy.priority} priority)` : ""} (environment: ${policy.environment})`;
-    default:
-      return "Unknown policy";
+const messages = {
+  idle: "Updates run in the background.",
+  checking: "Checking for updates…",
+  available: "An update is available.",
+  downloading: "Downloading update…",
+  downloaded: "Your update is ready.",
+  applying: "Restarting…",
+  "update-cancelled": "The update was cancelled.",
+  failed: "The update couldn’t be completed. We’ll check again later.",
+};
+
+const channel = new Channel(({ state }) => {
+  message.textContent = messages[state.type];
+  restart.hidden = state.type !== "downloaded";
+  progress.hidden = state.type !== "downloading";
+  if (state.type === "downloading" && state.progress !== undefined) progress.value = state.progress;
+  else progress.removeAttribute("value");
+});
+
+void invoke("subscribe_updates", { channel }).catch(() => {
+  message.textContent = "Couldn’t connect to the update service.";
+});
+
+restart.addEventListener("click", async () => {
+  restart.disabled = true;
+  try {
+    await invoke("apply_update");
+  } catch {
+    message.textContent = "The update couldn’t be installed. Please try again.";
+  } finally {
+    restart.disabled = false;
   }
-}
-
-async function refresh() {
-  const status = await invoke("barrel_get_status");
-  policyEl.textContent = describePolicy(status.policy);
-  errorEl.textContent = status.lastUpdateError
-    ? `${status.lastUpdateError.title} (${status.lastUpdateError.failureMode})`
-    : "None this session";
-}
-
-applyButton.addEventListener("click", () => {
-  void invoke("barrel_apply_update");
 });
-
-downloadButton.addEventListener("click", () => {
-  void invoke("barrel_download_update");
-});
-
-void refresh();
-setInterval(refresh, 2000);

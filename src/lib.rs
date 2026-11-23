@@ -3,134 +3,29 @@
 //! to Barrel so you can see what's actually happening on your users' machines.
 #![warn(missing_docs, missing_debug_implementations)]
 
-mod adapters;
-mod attributes;
-mod cadence;
-mod env;
-mod error_taxonomy;
 mod errors;
-mod host_control;
-mod internal_defects;
-mod jitter;
-mod keys;
-mod persistence;
-/// Wire-protocol primitives (check-in, pre-action-check, Policy
-/// verification) this crate's own test service calls directly -- public
-/// only under `test-service`, which a normal consumer never enables.
-#[cfg(feature = "test-service")]
-pub mod protocol;
-#[cfg(not(feature = "test-service"))]
-mod protocol;
+mod init_config;
 /// Conformance-only environment and native updater observations.
 #[cfg(feature = "test-service")]
 pub mod test_service;
-mod types;
+/// Update status and manual controls -- namespaced rather than living at
+/// the crate root, since a future Barrel module (telemetry, etc.) would
+/// otherwise collide with generic names like `subscribe`/`download`.
+pub mod updates;
 
-use std::sync::{Arc, Mutex, OnceLock};
-use tauri::{plugin::TauriPlugin, AppHandle, Manager, RunEvent, Runtime, WindowEvent};
+use tauri::{plugin::TauriPlugin, Manager, RunEvent, Runtime};
 
-use adapters::Adapter;
-use cadence::{start_cadence, CadenceShared};
-use host_control::HostControl;
-use persistence::buffered_facts::BufferedFactsStore;
-use persistence::installation_id::InstallationIdStore;
-use persistence::key_rotation::TrustedKeyStore;
-use persistence::version_expectation::VersionExpectationStore;
+use updates::runtime::{bootstrap, finish_quit_deferral, handle_window_event, shared_for};
+
+const MAX_HOLD_CACHE_MAX_AGE_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
 pub use errors::BarrelConfigError;
+pub use init_config::InitConfig;
 /// Bundles `base_url`/`credential`/`installation_id` for the protocol
 /// calls this crate's own test service drives directly -- public only
 /// under `test-service`, same as `protocol` itself.
 #[cfg(feature = "test-service")]
-pub use types::BackendConnection;
-pub use types::{AdapterState, InitConfig, Policy, UpdateFailure, UpdateFailureMode};
-
-static POLICY: Mutex<Option<Policy>> = Mutex::new(None);
-static SHARED: OnceLock<Arc<dyn std::any::Any + Send + Sync>> = OnceLock::new();
-static FOCUS_TRIGGER: OnceLock<Arc<tokio::sync::Notify>> = OnceLock::new();
-
-const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
-const MAX_HOLD_CACHE_MAX_AGE_MS: u64 = 7 * 24 * 60 * 60 * 1000;
-
-/// Synchronous getter. `None` before the first successful check-in --
-/// never a synthesized default.
-pub fn get_policy() -> Option<Policy> {
-    POLICY.lock().unwrap().clone()
-}
-
-/// Synchronous getter. Falls back to the most recent buffered
-/// `updateError` fact when the adapter's own in-memory last-error is
-/// empty.
-///
-/// That's the case on a fresh process that crashed or was killed before
-/// this session ever ran. `None` only if nothing's failed at all.
-pub fn get_last_update_error<R: Runtime>(app: &AppHandle<R>) -> Option<UpdateFailure> {
-    let shared = shared_for::<R>(app)?;
-    shared
-        .adapter
-        .last_error()
-        .or_else(|| shared.facts.latest_update_error())
-}
-
-/// Synchronous getter. `None` before the plugin's `setup` hook has run.
-pub fn get_adapter_state<R: Runtime>(app: &AppHandle<R>) -> Option<AdapterState> {
-    shared_for::<R>(app).map(|shared| shared.adapter.state())
-}
-
-/// Fires on every local adapter-state transition, in addition to -- never
-/// instead of -- `get_adapter_state()`'s own polling. `None` before the
-/// plugin's `setup` hook has run; call again once it has.
-pub fn subscribe_adapter_state<R: Runtime>(
-    app: &AppHandle<R>,
-) -> Option<tokio::sync::watch::Receiver<AdapterState>> {
-    shared_for::<R>(app).map(|shared| shared.adapter.subscribe_state())
-}
-
-/// Host-triggered earlier apply, ahead of the natural-quit default.
-pub fn apply_update<R: Runtime>(app: &AppHandle<R>) {
-    let Some(shared) = shared_for::<R>(app) else {
-        return;
-    };
-    tauri::async_runtime::spawn(perform_apply(shared));
-}
-
-async fn perform_apply<R: Runtime>(shared: Arc<CadenceShared<R>>) {
-    let (base_url, trusted_key_pem) =
-        cadence::resolve_connection_fields(&shared.config, &shared.trusted_keys).await;
-    let ctx = shared.action_context(&base_url, &trusted_key_pem);
-    shared
-        .host_control
-        .apply_update(
-            &ctx,
-            &shared.adapter,
-            &shared.facts,
-            &shared.version_expectations,
-            &shared.version_expectation_path,
-        )
-        .await;
-}
-
-/// Host-triggered download when automatic downloads are disabled.
-pub fn download_update<R: Runtime>(app: &AppHandle<R>) {
-    let Some(shared) = shared_for::<R>(app) else {
-        return;
-    };
-    tauri::async_runtime::spawn(perform_download(shared));
-}
-
-async fn perform_download<R: Runtime>(shared: Arc<CadenceShared<R>>) {
-    let (base_url, trusted_key_pem) =
-        cadence::resolve_connection_fields(&shared.config, &shared.trusted_keys).await;
-    let ctx = shared.action_context(&base_url, &trusted_key_pem);
-    shared
-        .host_control
-        .download_update(&ctx, &shared.adapter, &shared.facts)
-        .await;
-}
-
-fn shared_for<R: Runtime>(_app: &AppHandle<R>) -> Option<Arc<CadenceShared<R>>> {
-    SHARED.get()?.clone().downcast::<CadenceShared<R>>().ok()
-}
+pub use updates::protocol::wire_types::BackendConnection;
 
 /// Call `.barrel_kit(config)` on your `tauri::Builder` instead of adding
 /// this plugin directly -- full-wrap means `tauri-plugin-updater` is this
@@ -142,7 +37,11 @@ pub trait BarrelKitExt<R: Runtime> {
 
 impl<R: Runtime> BarrelKitExt<R> for tauri::Builder<R> {
     fn barrel_kit(self, config: InitConfig) -> Self {
-        self.plugin(tauri_plugin_updater::Builder::new().build())
+        let mut updater_builder = tauri_plugin_updater::Builder::new();
+        if let Some(artifact_public_key) = config.updates.artifact_public_key.clone() {
+            updater_builder = updater_builder.pubkey(artifact_public_key);
+        }
+        self.plugin(updater_builder.build())
             .plugin(tauri_plugin_store::Builder::default().build())
             .plugin(plugin(config))
     }
@@ -157,7 +56,10 @@ fn plugin<R: Runtime>(config: InitConfig) -> TauriPlugin<R> {
 
             // This way a second call with e.g. a blank credential still
             // no-ops instead of throwing.
-            if SHARED.get().is_some() {
+            if app
+                .try_state::<std::sync::Arc<updates::adapters::Adapter>>()
+                .is_some()
+            {
                 return Ok(());
             }
 
@@ -166,14 +68,16 @@ fn plugin<R: Runtime>(config: InitConfig) -> TauriPlugin<R> {
                     "Barrel: init() requires a non-empty `credential`.",
                 )));
             }
-            if let Err(err) = validate_hold_cache_max_age(config.hold_cache_max_age_ms) {
+            if let Err(err) = validate_hold_cache_max_age(config.updates.hold_cache_max_age_ms) {
                 return Err(Box::new(err));
             }
 
+            let adapter = std::sync::Arc::new(updates::adapters::Adapter::new());
+            app.manage(adapter.clone());
             let app_handle = app.clone();
             let config = config.clone();
             tauri::async_runtime::spawn(async move {
-                bootstrap(app_handle, config).await;
+                bootstrap(app_handle, config, adapter).await;
             });
 
             Ok(())
@@ -184,10 +88,7 @@ fn plugin<R: Runtime>(config: InitConfig) -> TauriPlugin<R> {
                 if let Some(shared) = shared_for::<R>(app) {
                     if shared.host_control.has_pending_install() {
                         api.prevent_exit();
-                        let app = app.clone();
-                        tauri::async_runtime::spawn(async move {
-                            apply_update(&app);
-                        });
+                        tauri::async_runtime::spawn(finish_quit_deferral(app.clone()));
                     }
                 }
             }
@@ -220,134 +121,44 @@ fn validate_hold_cache_max_age(
     Ok(())
 }
 
-/// Resolves what the previous session's apply attempt, if any,
-/// expected to be running by now against what's actually running, then
-/// clears the marker either way so this only ever fires once per attempt.
-async fn check_version_expectation<R: Runtime>(
-    app: &AppHandle<R>,
-    facts: &BufferedFactsStore<R>,
-    version_expectations: &VersionExpectationStore<R>,
-    path: &std::path::Path,
-) {
-    let Some(expected_version) = version_expectations.read(path).await else {
-        return;
-    };
-
-    let running_version = app.package_info().version.to_string();
-    if expected_version != running_version {
-        let (failure, _) = error_taxonomy::build_failure_state(
-            "version-check",
-            types::UpdateFailureMode::ApplyNotConfirmed,
-            types::Phase::Install,
-            &format!("expected {expected_version}, running {running_version}"),
-        );
-        facts.record_update_error(failure).await;
-    }
-
-    version_expectations.clear(path).await;
-}
-
-async fn bootstrap<R: Runtime>(app: AppHandle<R>, config: InitConfig) {
-    // A second `barrel_kit()` call must be a silent no-op, never a second
-    // `Adapter`/cadence loop double-driving the native updater --
-    // `SHARED.set()` alone doesn't prevent that, so this check comes first.
-    if SHARED.get().is_some() {
-        return;
-    }
-
-    let log: Box<dyn Fn(&str) + Send + Sync> = if config.debug {
-        Box::new(|message: &str| {
-            #[cfg(feature = "test-service")]
-            test_service::resilience_commands::record_log(message);
-            eprintln!("[barrel-kit] {message}");
-        })
-    } else {
-        Box::new(|_: &str| {})
-    };
-
-    // `tauri build` rejects the placeholder identifier outright, so a real
-    // shipped app always has a real one; this only fails if the OS itself
-    // can't resolve any per-user data directory at all.
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .expect("Barrel: could not resolve this app's data directory");
-    #[cfg(feature = "test-service")]
-    let data_dir = test_service::runtime::directory().unwrap_or(data_dir);
-
-    let installation_id_path = data_dir.join("barrel-installation.json");
-    let facts_path = data_dir.join("barrel-buffered-facts.json");
-    let trusted_key_path = data_dir.join("barrel-trusted-key.json");
-    let version_expectation_path = data_dir.join("barrel-version-expectation.json");
-
-    let installation_ids = InstallationIdStore::new(app.clone());
-    let installation_id = installation_ids.get_or_create(&installation_id_path).await;
-
-    let facts = BufferedFactsStore::new(app.clone());
-    facts.configure(&facts_path).await;
-
-    let trusted_keys = TrustedKeyStore::new(app.clone());
-    trusted_keys
-        .get_or_create(&trusted_key_path, keys::PUBLIC_ED25519_KEY_PEM)
-        .await;
-
-    let version_expectations = VersionExpectationStore::new(app.clone());
-    check_version_expectation(
-        &app,
-        &facts,
-        &version_expectations,
-        &version_expectation_path,
-    )
-    .await;
-
-    let client = reqwest::Client::new();
-
-    let adapter = Adapter::new();
-    if let Some(url) = config.update_feed_url.clone() {
-        adapter.set_feed_url(url);
-    }
-
-    let shared = Arc::new(CadenceShared {
-        app: app.clone(),
-        client,
-        adapter,
-        facts,
-        trusted_keys,
-        trusted_key_path,
-        version_expectations,
-        version_expectation_path,
-        host_control: HostControl::new(),
-        installation_id,
-        installation_ids,
-        installation_id_path,
-        config,
-        sdk_version: SDK_VERSION.to_string(),
-        log,
-        in_flight: std::sync::atomic::AtomicBool::new(false),
-    });
-
-    if SHARED
-        .set(shared.clone() as Arc<dyn std::any::Any + Send + Sync>)
-        .is_err()
-    {
-        return; // Lost the race to a concurrent call -- let that one proceed instead.
-    }
-
-    let focus_trigger = start_cadence(shared);
-    let _ = FOCUS_TRIGGER.set(focus_trigger.clone());
-}
-
-fn handle_window_event(event: &WindowEvent) {
-    if matches!(event, WindowEvent::Focused(true)) {
-        if let Some(trigger) = FOCUS_TRIGGER.get() {
-            trigger.notify_one();
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use updates::persistence::buffered_facts::BufferedFactsStore;
+    use updates::persistence::version_expectation::VersionExpectationStore;
+    use updates::runtime::check_version_expectation;
+
+    #[test]
+    fn plugin_setup_rejects_invalid_configuration_before_bootstrap() {
+        for config in [
+            InitConfig {
+                credential: String::new(),
+                ..Default::default()
+            },
+            InitConfig {
+                credential: "  ".into(),
+                ..Default::default()
+            },
+            InitConfig {
+                credential: "cred".into(),
+                updates: crate::updates::Config {
+                    hold_cache_max_age_ms: Some(MAX_HOLD_CACHE_MAX_AGE_MS + 1),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ] {
+            let result = tauri::test::mock_builder()
+                .plugin(plugin(config))
+                .build(tauri::test::mock_context(tauri::test::noop_assets()));
+
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!("invalid configuration must fail before bootstrap"),
+            };
+            assert!(error.to_string().contains("Barrel:"));
+        }
+    }
 
     #[test]
     fn no_hold_cache_max_age_configured_passes() {
@@ -373,7 +184,7 @@ mod tests {
 
     #[tokio::test]
     async fn check_version_expectation_clears_the_marker_silently_on_a_match() {
-        let app = persistence::test_support::mock_app();
+        let app = updates::persistence::test_support::mock_app();
         let running_version = app.package_info().version.to_string();
         let facts = BufferedFactsStore::new(app.handle().clone());
         let version_expectations = VersionExpectationStore::new(app.handle().clone());
@@ -388,7 +199,7 @@ mod tests {
 
     #[tokio::test]
     async fn check_version_expectation_records_apply_not_confirmed_on_a_mismatch() {
-        let app = persistence::test_support::mock_app();
+        let app = updates::persistence::test_support::mock_app();
         let running_version = app.package_info().version.to_string();
         let facts = BufferedFactsStore::new(app.handle().clone());
         let version_expectations = VersionExpectationStore::new(app.handle().clone());

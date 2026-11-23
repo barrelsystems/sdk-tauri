@@ -1,4 +1,4 @@
-use crate::types::{Phase, UpdateFailureMode};
+use crate::updates::models::failure::{Phase, UpdateFailureMode};
 use tauri_plugin_updater::Error as UpdaterError;
 
 /// Maps every real variant of `tauri_plugin_updater::Error` to the
