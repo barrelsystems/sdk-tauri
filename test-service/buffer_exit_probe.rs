@@ -61,7 +61,10 @@ pub async fn run_child(config: String) {
         .barrel_kit(InitConfig {
             credential: "test-service".into(),
             base_url: Some("http://127.0.0.1:0".into()),
-            auto_download: Some(false),
+            updates: tauri_plugin_barrel_kit::updates::Config {
+                auto_download: Some(false),
+                ..Default::default()
+            },
             ..Default::default()
         })
         .build(crate::test_context())

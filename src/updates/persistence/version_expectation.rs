@@ -41,7 +41,7 @@ impl<R: Runtime> VersionExpectationStore<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::persistence::test_support::mock_app;
+    use crate::updates::persistence::test_support::mock_app;
     use tempfile::NamedTempFile;
 
     #[tokio::test]

@@ -22,7 +22,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
-# Policy-signature verification -- Rust's std has no Ed25519 of its own.
+# Update-eligibility-signature verification -- Rust's std has no Ed25519 of its own.
 ed25519-dalek = { version = "2", features = ["pkcs8"] }
 # Parses the embedded/rotated PEM keys ed25519-dalek's own API doesn't decode.
 pkcs8 = { version = "0.10", features = ["pem", "alloc"] }
@@ -30,6 +30,9 @@ pkcs8 = { version = "0.10", features = ["pem", "alloc"] }
 base64 = "0.22"
 # Generates the random installation ID; std has no UUID generator.
 uuid = { version = "1", features = ["v4"] }
+# RFC 3339 formatting/parsing for timestamps -- already in the dependency
+# graph transitively, and far lighter than chrono for this alone.
+time = { version = "0.3", default-features = false, features = ["formatting", "parsing"] }
 
 [dev-dependencies]
 minisign = "0.10"

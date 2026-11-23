@@ -5,10 +5,7 @@ mod routes;
 mod runtime;
 mod wire_types;
 
-/// `tauri_plugin_barrel_kit`'s shared state is a process-wide `OnceLock`.
-/// A second `barrel_kit()` call in one process is a silent no-op by
-/// design, so one process can only ever host one adapter -- `routes::run`
-/// spawns a fresh child per `createAdapter` instead.
+/// The runtime is process-scoped; each adapter needs an isolated child process.
 pub(crate) const WORKER_ENV_VAR: &str = "BARREL_TEST_SERVICE_WORKER_CONFIG";
 
 #[tokio::main]

@@ -1,4 +1,5 @@
-use crate::types::{AdapterState, FailureCategory, Phase, UpdateFailure, UpdateFailureMode};
+use crate::updates::models::failure::{FailureCategory, Phase, UpdateFailure, UpdateFailureMode};
+use crate::updates::models::state::UpdateState;
 
 fn failure_mode_title(failure_mode: UpdateFailureMode) -> &'static str {
     use UpdateFailureMode::*;
@@ -37,7 +38,7 @@ pub fn build_failure_state(
     failure_mode: UpdateFailureMode,
     phase: Phase,
     platform_code: &str,
-) -> (UpdateFailure, AdapterState) {
+) -> (UpdateFailure, UpdateState) {
     let failure = UpdateFailure {
         phase,
         failure_mode,
@@ -45,7 +46,7 @@ pub fn build_failure_state(
         platform: platform.to_string(),
         platform_code: platform_code.to_string(),
     };
-    let state = AdapterState::Failed {
+    let state = UpdateState::Failed {
         category: category_for_phase(phase),
         code: failure_mode,
         platform_code: platform_code.to_string(),
@@ -101,7 +102,7 @@ mod tests {
     }
 
     #[test]
-    fn builds_a_failure_and_a_matching_failed_adapter_state_from_one_classification() {
+    fn builds_a_failure_and_a_matching_failed_update_state_from_one_classification() {
         let (failure, state) = build_failure_state(
             "tauri-updater",
             UpdateFailureMode::DownloadTransportFailed,
@@ -118,7 +119,7 @@ mod tests {
         assert_eq!(failure.platform_code, "download-transport-failed");
         assert_eq!(
             state,
-            AdapterState::Failed {
+            UpdateState::Failed {
                 category: FailureCategory::Download,
                 code: UpdateFailureMode::DownloadTransportFailed,
                 platform_code: "download-transport-failed".to_string(),

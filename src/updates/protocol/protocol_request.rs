@@ -1,6 +1,7 @@
 use std::time::Duration;
 
-use crate::types::{CheckInResponse, PROTOCOL_VERSION};
+use crate::updates::protocol::wire_types::CheckInResponse;
+use crate::updates::protocol::wire_types::PROTOCOL_VERSION;
 
 pub(crate) struct PostProtocolRequestParams<'a> {
     pub base_url: &'a str,
@@ -10,12 +11,8 @@ pub(crate) struct PostProtocolRequestParams<'a> {
     pub operation: &'a str,
 }
 
-/// Posts a JSON body per `params`, then validates the response envelope: a
-/// transport failure, a non-2xx status, a parse failure, or an unrecognized
-/// `protocolVersion` all fail open to `None`, logged under `params.operation`.
-///
-/// Shared by `check_in` and `pre_action_check` -- both return the identical
-/// `{protocolVersion, policy, signature}` envelope shape.
+/// Validate the complete response envelope; request, HTTP, parse and validation failures
+/// return no new decision.
 pub(crate) async fn post_protocol_request(
     client: &reqwest::Client,
     params: PostProtocolRequestParams<'_>,
@@ -76,10 +73,8 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    /// Starts a tiny raw-TCP server that accepts exactly one connection,
-    /// drains the request, writes back `raw_response` verbatim, then
-    /// exits -- enough to drive `post_protocol_request` through a
-    /// real HTTP round trip without a mocking dependency.
+    /// Serve one raw response after draining request headers so transport/error tests observe
+    /// real HTTP behavior.
     async fn serve_once(raw_response: &'static str) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -105,7 +100,7 @@ mod tests {
 
     #[tokio::test]
     async fn succeeds_on_a_valid_envelope() {
-        let body = json!({ "protocolVersion": 1, "policy": "{}", "signature": "sig" });
+        let body = json!({ "protocolVersion": 1, "updateEligibility": "{}", "signature": "sig" });
         let raw = http_ok(&body);
         let base_url = serve_once(Box::leak(raw.into_boxed_str())).await;
 
@@ -152,7 +147,7 @@ mod tests {
 
     #[tokio::test]
     async fn fails_open_on_an_unrecognized_protocol_version() {
-        let body = json!({ "protocolVersion": 99, "policy": "{}", "signature": "sig" });
+        let body = json!({ "protocolVersion": 99, "updateEligibility": "{}", "signature": "sig" });
         let raw = http_ok(&body);
         let base_url = serve_once(Box::leak(raw.into_boxed_str())).await;
 

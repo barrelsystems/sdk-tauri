@@ -4,7 +4,7 @@ State a rule here only if it's short and always relevant. Push anything longer
 or conditional to a pointed-to doc. This repo is published publicly — never
 add a reference here (or anywhere else in this repo) to internal tooling,
 ticket IDs, team names, or a non-public sibling repo's name/path
-(`infrastructure`, the Home Repo). The other public repos in this SDK family
+(including private workspace paths). The other public repos in this SDK family
 (sdk-electron/sdk-tauri/sdk-swift/sdk-conformance-harness) may be referenced
 where structurally necessary — a dependency, a CI job driving the
 conformance harness.
@@ -20,10 +20,15 @@ have no "optional peer dependency" concept the way npm does.
 
 ## Error handling
 
-Every I/O path (installation-ID persistence, check-in requests, Policy
-signature verification) fails open: keep the prior state, never panic, never
-retry in a loop. A returned `Err` from `init()` is reserved for synchronous,
-caller-fixable misconfiguration (e.g. a blank credential).
+Background reporting, verification, and persistence fail open: retain prior
+state and avoid retry loops. Initialization rejects caller-fixable configuration.
+Explicit update commands return classified action errors for denial or failure.
+
+## SDK parity
+
+Align product namespaces, public behavior, and concern ownership across SDK ports.
+Language conventions and documented native capabilities may differ. When fixing a
+protocol or lifecycle bug, check the other ports for the same defect.
 
 ## Commit policy
 

@@ -10,7 +10,6 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use tokio::io::AsyncBufReadExt;
 
-use crate::mock_update_server::MockResponse;
 use crate::wire_types::{
     Capabilities, CreateAdapterRequest, CreateAdapterResponse, JitterFractionRequest,
 };
@@ -59,50 +58,15 @@ async fn capabilities() -> Json<Capabilities> {
     })
 }
 
-/// Spawns a worker process for this one adapter, configured via `variant`
-/// -- JSON-encoding the `MockResponse` the worker's own mock update
-/// server serves to its one automatic check.
+/// Each adapter owns an isolated native runtime and release-feed fixture.
 async fn create_adapter(
     State(state): State<RoutesState>,
     Json(payload): Json<CreateAdapterRequest>,
 ) -> Response {
-    let variant_json = payload
-        .variant
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| r#"{"kind":"noUpdate"}"#.to_string());
-
-    // Bounded well above any real MockResponse's encoded size -- rejects a
-    // pathological payload before it ever reaches the deserializer.
-    const MAX_VARIANT_JSON_LEN: usize = 4096;
-    if variant_json.len() > MAX_VARIANT_JSON_LEN {
-        return (
-            StatusCode::BAD_REQUEST,
-            "variant JSON exceeds the size limit",
-        )
-            .into_response();
-    }
-
-    // Deserialize straight into the strict, validated type -- never hold
-    // onto the untyped `Value` this parses through, so nothing downstream
-    // can see a field this type doesn't itself constrain.
-    let mock_response: MockResponse = match serde_json::from_str(&variant_json) {
-        Ok(mock_response) => mock_response,
-        Err(error) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                format!("invalid variant JSON: {error}"),
-            )
-                .into_response()
-        }
-    };
-
-    // The check-in `baseUrl`/`publicKeyPem` every adapter now always
-    // carries are passed through here unchanged, regardless of `variant`.
     let directory =
         std::env::temp_dir().join(format!("barrel-tauri-runtime-{}", uuid::Uuid::new_v4()));
     let config_json = serde_json::json!({
         "directory": directory,
-        "mockResponse": mock_response,
         "checkInBaseUrl": payload.check_in_base_url,
         "publicKeyPem": payload.public_key_pem,
         "channel": payload.channel,
@@ -220,12 +184,8 @@ async fn destroy_adapter(State(state): State<RoutesState>, Path(id): Path<String
     StatusCode::NO_CONTENT.into_response()
 }
 
-/// Not implemented against the real adapter -- `jitterFraction` is a pure
-/// cross-SDK equivalence check, out of scope for this adapter-mapping work.
-async fn jitter_fraction(Json(_payload): Json<JitterFractionRequest>) -> Response {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        "tauri test-service: jitterFraction equivalence not yet wired",
-    )
-        .into_response()
+async fn jitter_fraction(Json(payload): Json<JitterFractionRequest>) -> Response {
+    Json(serde_json::json!({
+        "fraction": tauri_plugin_barrel_kit::test_service::runtime::jitter_fraction(&payload.installation_id)
+    })).into_response()
 }

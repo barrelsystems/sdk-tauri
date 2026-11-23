@@ -1,18 +1,23 @@
 use super::persistence_writer::PersistenceWriter;
+use crate::updates::clock::now_iso8601;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Runtime};
 
 use super::disk_store::DiskStore;
-use crate::types::{AdapterState, UpdateFailure};
+use crate::updates::models::failure::UpdateFailure;
+use crate::updates::models::state::UpdateState;
 
 const MAX_BUFFERED_FACTS: usize = 32;
 
-fn is_terminal_adapter_state(state: &AdapterState) -> bool {
+fn is_terminal_update_state(state: &UpdateState) -> bool {
     matches!(
         state,
-        AdapterState::Downloaded | AdapterState::Failed { .. } | AdapterState::UpdateCancelled
+        UpdateState::Downloaded
+            | UpdateState::Applying
+            | UpdateState::Failed { .. }
+            | UpdateState::UpdateCancelled
     )
 }
 
@@ -20,11 +25,11 @@ fn is_terminal_adapter_state(state: &AdapterState) -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all_fields = "camelCase")]
 pub enum BufferedFact {
-    #[serde(rename = "adapterState")]
-    AdapterState {
+    #[serde(rename = "lifecycleState")]
+    LifecycleState {
         #[serde(skip, default = "uuid::Uuid::new_v4")]
         observation_id: uuid::Uuid,
-        state: AdapterState,
+        state: UpdateState,
         first_observed_at: String,
         last_observed_at: String,
         occurrence_count: u32,
@@ -53,20 +58,20 @@ impl BufferedFact {
                     &failure.platform_code
                 )
             ),
-            BufferedFact::AdapterState { state, .. } => format!("adapterState:{state:?}"),
+            BufferedFact::LifecycleState { state, .. } => format!("lifecycleState:{state:?}"),
         }
     }
 
     fn priority(&self) -> u8 {
         match self {
             BufferedFact::UpdateError { .. } => 1,
-            BufferedFact::AdapterState { state, .. } => u8::from(is_terminal_adapter_state(state)),
+            BufferedFact::LifecycleState { state, .. } => u8::from(is_terminal_update_state(state)),
         }
     }
 
     fn last_observed_at(&self) -> &str {
         match self {
-            BufferedFact::AdapterState {
+            BufferedFact::LifecycleState {
                 last_observed_at, ..
             }
             | BufferedFact::UpdateError {
@@ -77,7 +82,7 @@ impl BufferedFact {
 
     fn first_observed_at(&self) -> &str {
         match self {
-            BufferedFact::AdapterState {
+            BufferedFact::LifecycleState {
                 first_observed_at, ..
             }
             | BufferedFact::UpdateError {
@@ -88,7 +93,7 @@ impl BufferedFact {
 
     fn occurrence_count(&self) -> u32 {
         match self {
-            BufferedFact::AdapterState {
+            BufferedFact::LifecycleState {
                 occurrence_count, ..
             }
             | BufferedFact::UpdateError {
@@ -101,7 +106,7 @@ impl BufferedFact {
         let first_observed_at = existing.first_observed_at().to_string();
         let occurrence_count = existing.occurrence_count() + 1;
         match &mut self {
-            BufferedFact::AdapterState {
+            BufferedFact::LifecycleState {
                 first_observed_at: f,
                 occurrence_count: o,
                 ..
@@ -167,11 +172,8 @@ impl<R: Runtime> BufferedFactsStore<R> {
             .clone()
     }
 
-    /// Clears exactly the facts in `sent` (a snapshot `snapshot()` returned
-    /// earlier) -- call only once ingestion ACKs the check-in that carried
-    /// them, never optimistically.
-    ///
-    /// A fact recorded after `sent` was taken must survive this call.
+    /// Acknowledge only the sent observations; preserve newer equal-valued or concurrently
+    /// recorded facts.
     pub async fn clear(&self, sent: &[BufferedFact]) {
         let mut buffer = self
             .buffer
@@ -181,16 +183,23 @@ impl<R: Runtime> BufferedFactsStore<R> {
         self.persist_locked(&buffer);
     }
 
-    pub async fn record_adapter_state(&self, state: AdapterState) {
+    pub async fn record_lifecycle_state(&self, state: UpdateState) {
+        self.record_lifecycle_state_now(state);
+    }
+
+    pub fn record_lifecycle_state_now(&self, state: UpdateState) {
+        if !state.is_reportable() {
+            return;
+        }
+
         let now = now_iso8601();
-        self.upsert(BufferedFact::AdapterState {
+        self.upsert(BufferedFact::LifecycleState {
             observation_id: uuid::Uuid::new_v4(),
             state,
             first_observed_at: now.clone(),
             last_observed_at: now,
             occurrence_count: 1,
-        })
-        .await;
+        });
     }
 
     pub async fn record_update_error(&self, failure: UpdateFailure) {
@@ -201,19 +210,15 @@ impl<R: Runtime> BufferedFactsStore<R> {
             first_observed_at: now.clone(),
             last_observed_at: now,
             occurrence_count: 1,
-        })
-        .await;
+        });
     }
 
     /// `getLastUpdateError()`'s fallback source on a fresh process: the
     /// most recently observed buffered `updateError` fact, picked by
     /// `last_observed_at`.
-    ///
-    /// A full `UpdateError` already carries its own `title`, resolved at
-    /// the time it was recorded, so no further lookup is needed here.
-    ///
-    /// The memory lock is never held across disk I/O.
     pub fn latest_update_error(&self) -> Option<UpdateFailure> {
+        // Synchronous and self-contained -- dropped well before any disk
+        // I/O this store does elsewhere.
         let buffer = self.buffer.lock().ok()?;
         buffer
             .iter()
@@ -223,13 +228,15 @@ impl<R: Runtime> BufferedFactsStore<R> {
                     last_observed_at,
                     ..
                 } => Some((last_observed_at.as_str(), failure)),
-                BufferedFact::AdapterState { .. } => None,
+                BufferedFact::LifecycleState { .. } => None,
             })
             .max_by_key(|(last_observed_at, _)| *last_observed_at)
+            // A full `UpdateError` already carries its own resolved `title`,
+            // so no further lookup is needed here.
             .map(|(_, failure)| failure.clone())
     }
 
-    async fn upsert(&self, candidate: BufferedFact) {
+    fn upsert(&self, candidate: BufferedFact) {
         let mut buffer = self
             .buffer
             .lock()
@@ -300,22 +307,15 @@ fn find_eviction_candidate_index(buffer: &[BufferedFact]) -> Option<usize> {
         .map(|(index, _)| index)
 }
 
-// A thin forward, not a duplicate -- `check_in` already imports
-// `BufferedFact` from here, so importing its `now_iso8601` back would
-// make the two modules depend on each other both ways.
-fn now_iso8601() -> String {
-    crate::protocol::check_in::now_iso8601()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::persistence::test_support::mock_app;
-    use crate::types::{FailureCategory, UpdateFailureMode};
+    use crate::updates::models::failure::{FailureCategory, UpdateFailureMode};
+    use crate::updates::persistence::test_support::mock_app;
     use tempfile::NamedTempFile;
 
-    fn failed_state() -> AdapterState {
-        AdapterState::Failed {
+    fn failed_state() -> UpdateState {
+        UpdateState::Failed {
             category: FailureCategory::Download,
             code: UpdateFailureMode::Unknown,
             platform_code: "x".to_string(),
@@ -324,7 +324,7 @@ mod tests {
 
     fn update_error(platform_code: &str) -> UpdateFailure {
         UpdateFailure {
-            phase: crate::types::Phase::Download,
+            phase: crate::updates::models::failure::Phase::Download,
             failure_mode: UpdateFailureMode::Unknown,
             title: "x".to_string(),
             platform: "tauri-updater".to_string(),
@@ -360,8 +360,8 @@ mod tests {
         let path = NamedTempFile::new().unwrap().path().to_path_buf();
         store.configure(&path).await;
 
-        store.record_adapter_state(AdapterState::Idle).await;
-        store.record_adapter_state(AdapterState::Idle).await;
+        store.record_lifecycle_state(UpdateState::Idle).await;
+        store.record_lifecycle_state(UpdateState::Idle).await;
 
         let snapshot = store.snapshot().await;
         assert_eq!(snapshot.len(), 1);
@@ -375,9 +375,9 @@ mod tests {
         let path = NamedTempFile::new().unwrap().path().to_path_buf();
         store.configure(&path).await;
 
-        store.record_adapter_state(AdapterState::Checking).await;
+        store.record_lifecycle_state(UpdateState::Checking).await;
         let sent = store.snapshot().await;
-        store.record_adapter_state(failed_state()).await; // recorded mid-flight
+        store.record_lifecycle_state(failed_state()).await; // recorded mid-flight
 
         store.clear(&sent).await;
 
@@ -385,15 +385,15 @@ mod tests {
         assert_eq!(remaining.len(), 1);
         assert!(matches!(
             remaining[0],
-            BufferedFact::AdapterState {
-                state: AdapterState::Failed { .. },
+            BufferedFact::LifecycleState {
+                state: UpdateState::Failed { .. },
                 ..
             }
         ));
     }
 
-    fn fixed_fact(state: AdapterState) -> BufferedFact {
-        BufferedFact::AdapterState {
+    fn fixed_fact(state: UpdateState) -> BufferedFact {
+        BufferedFact::LifecycleState {
             observation_id: uuid::Uuid::new_v4(),
             state,
             first_observed_at: "2026-01-01T00:00:00.000Z".into(),
@@ -406,10 +406,10 @@ mod tests {
     async fn acknowledgment_preserves_an_unsent_equal_valued_observation() {
         let app = mock_app();
         let store = BufferedFactsStore::new(app.handle().clone());
-        store.upsert(fixed_fact(AdapterState::Checking)).await;
+        store.upsert(fixed_fact(UpdateState::Checking));
         let sent = store.snapshot().await;
-        store.upsert(fixed_fact(AdapterState::Downloaded)).await;
-        store.upsert(fixed_fact(AdapterState::Checking)).await;
+        store.upsert(fixed_fact(UpdateState::Downloaded));
+        store.upsert(fixed_fact(UpdateState::Checking));
         let before = store.snapshot().await;
         assert_eq!(
             serde_json::to_value(&before[0]).unwrap(),
@@ -428,16 +428,14 @@ mod tests {
     async fn acknowledgment_cannot_clear_an_equal_replacement_after_eviction() {
         let app = mock_app();
         let store = BufferedFactsStore::new(app.handle().clone());
-        store.upsert(fixed_fact(AdapterState::Checking)).await;
+        store.upsert(fixed_fact(UpdateState::Checking));
         let sent = store.snapshot().await;
         for progress in 0..32 {
-            store
-                .upsert(fixed_fact(AdapterState::Downloading {
-                    progress: Some(progress),
-                }))
-                .await;
+            store.upsert(fixed_fact(UpdateState::Downloading {
+                progress: Some(progress),
+            }));
         }
-        store.upsert(fixed_fact(AdapterState::Checking)).await;
+        store.upsert(fixed_fact(UpdateState::Checking));
         let before = store.snapshot().await;
 
         store.clear(&sent).await;
@@ -458,7 +456,7 @@ mod tests {
         }
         assert_eq!(store.snapshot().await.len(), 32);
 
-        store.record_adapter_state(AdapterState::Checking).await;
+        store.record_lifecycle_state(UpdateState::Checking).await;
         assert_eq!(store.snapshot().await.len(), 32); // dropped, not evicted-in
     }
 
@@ -506,7 +504,7 @@ mod tests {
 }
 
 mod persisted_failure {
-    use crate::types::{Phase, UpdateFailure, UpdateFailureMode};
+    use crate::updates::models::failure::{Phase, UpdateFailure, UpdateFailureMode};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     #[derive(Serialize, Deserialize)]
@@ -535,7 +533,7 @@ mod persisted_failure {
         deserializer: D,
     ) -> Result<UpdateFailure, D::Error> {
         let stored = StoredFailure::deserialize(deserializer)?;
-        Ok(crate::error_taxonomy::build_failure_state(
+        Ok(crate::updates::error_taxonomy::build_failure_state(
             &stored.platform,
             stored.failure_mode,
             stored.phase,

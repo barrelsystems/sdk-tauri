@@ -4023,6 +4023,7 @@ dependencies = [
  "tauri",
  "tauri-plugin-store",
  "tauri-plugin-updater",
+ "time",
  "tokio",
  "uuid",
 ]

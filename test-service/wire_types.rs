@@ -28,8 +28,6 @@ pub struct CreateAdapterRequest {
     pub check_in_base_url: String,
     #[serde(rename = "publicKeyPem")]
     pub public_key_pem: String,
-    #[serde(default)]
-    pub variant: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -82,19 +80,14 @@ pub enum AdapterCommand {
     },
     #[serde(rename = "checkNow")]
     CheckNow,
-    #[serde(rename = "getAdapterState")]
-    GetAdapterState,
-    #[serde(rename = "getPolicy")]
-    GetPolicy,
+    #[serde(rename = "getUpdateState")]
+    GetUpdateState,
+    #[serde(rename = "getUpdateEligibility")]
+    GetUpdateEligibility,
+    #[serde(rename = "prepareUpdaterFailure")]
+    PrepareUpdaterFailure,
     #[serde(rename = "getLastUpdateError")]
     GetLastUpdateError,
-    #[serde(rename = "injectEvent")]
-    InjectEvent {
-        #[serde(rename = "eventName")]
-        event_name: String,
-        #[allow(dead_code)]
-        payload: Option<serde_json::Value>,
-    },
     #[serde(rename = "getUpdaterActivity")]
     GetUpdaterActivity,
     #[serde(rename = "prepareAction")]

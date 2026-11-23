@@ -2,8 +2,8 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use tauri_plugin_barrel_kit::protocol::pre_action_check::Stage;
 use tauri_plugin_barrel_kit::test_service;
+use tauri_plugin_barrel_kit::updates::protocol::pre_action_check::Stage;
 
 use crate::runtime::{DispatchState, ThreadRequest};
 use crate::wire_types::{AdapterCommand, ResultWrapper};
@@ -13,6 +13,10 @@ pub(crate) async fn dispatch_command(
     Json(command): Json<AdapterCommand>,
 ) -> Response {
     match command {
+        AdapterCommand::PrepareUpdaterFailure => {
+            test_service::runtime::prepare_updater_failure(&state.app).await;
+            Json(ResultWrapper { result: serde_json::Value::Null }).into_response()
+        }
         AdapterCommand::GetCadenceState => Json(ResultWrapper { result: test_service::resilience_commands::cadence_state(&state.app) }).into_response(),
         AdapterCommand::RestoreInstallationPersistence => Json(ResultWrapper { result: test_service::resilience_commands::restore_installation_persistence(&state.app) }).into_response(),
         AdapterCommand::GetPersistedInstallationId => Json(ResultWrapper {
@@ -51,27 +55,17 @@ pub(crate) async fn dispatch_command(
             result: crate::buffer_exit_probe::run_probe(mode, facts).await,
         })
         .into_response(),
-        AdapterCommand::GetPolicy => Json(ResultWrapper {
-            result: tauri_plugin_barrel_kit::get_policy(),
+        AdapterCommand::GetUpdateEligibility => Json(ResultWrapper {
+            result: crate::runtime::snapshot(&state.app)
+                .and_then(|status| status.eligibility),
         })
         .into_response(),
-        AdapterCommand::GetAdapterState => {
+        AdapterCommand::GetUpdateState => {
             send_adapter_request(&state.request_tx, ThreadRequest::GetState).await
         }
         AdapterCommand::GetLastUpdateError => {
             send_adapter_request(&state.request_tx, ThreadRequest::GetLastError).await
         }
-        AdapterCommand::InjectEvent { event_name, .. } if event_name == "triggerDownload" => {
-            send_adapter_request(&state.request_tx, ThreadRequest::TriggerDownload).await
-        }
-        AdapterCommand::InjectEvent { event_name, .. } if event_name == "startDownload" => {
-            send_adapter_request(&state.request_tx, ThreadRequest::StartDownload).await
-        }
-        AdapterCommand::InjectEvent { event_name, .. } => (
-            StatusCode::BAD_REQUEST,
-            format!("tauri test-service: unknown injectEvent eventName {event_name:?}"),
-        )
-            .into_response(),
         AdapterCommand::GetUpdaterActivity => Json(ResultWrapper {
             result: test_service::runtime::activity(),
         })

@@ -3,17 +3,17 @@
 use tauri::{AppHandle, Runtime};
 
 use super::runtime::directory;
-use crate::AdapterState;
+use crate::updates::models::state::UpdateState;
 
 /// An observation fed to the production fact store by conformance scenarios.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind")]
 pub enum FactObservation {
-    /// A local adapter transition.
-    #[serde(rename = "adapterState")]
-    AdapterState {
-        /// The observed adapter state.
-        state: AdapterState,
+    /// A local lifecycle-state transition.
+    #[serde(rename = "lifecycleState")]
+    LifecycleState {
+        /// The observed lifecycle state.
+        state: UpdateState,
     },
     /// A local update failure with a display-only title.
     #[serde(rename = "updateError")]
@@ -28,12 +28,17 @@ pub enum FactObservation {
 pub async fn record_fact<R: Runtime>(app: &AppHandle<R>, fact: FactObservation) {
     let shared = crate::shared_for(app).expect("SDK initialized");
     match fact {
-        FactObservation::AdapterState { state } => shared.facts.record_adapter_state(state).await,
+        FactObservation::LifecycleState { state } => {
+            // Mirrors `Adapter::set_state`'s own guard, injected or not.
+            if state.is_reportable() {
+                shared.facts.record_lifecycle_state(state).await;
+            }
+        }
         FactObservation::UpdateError { platform_code } => {
-            let failure = crate::error_taxonomy::build_failure_state(
+            let failure = crate::updates::error_taxonomy::build_failure_state(
                 "tauri-updater",
-                crate::UpdateFailureMode::Unknown,
-                crate::types::Phase::Download,
+                crate::updates::models::failure::UpdateFailureMode::Unknown,
+                crate::updates::models::failure::Phase::Download,
                 &platform_code,
             )
             .0;
