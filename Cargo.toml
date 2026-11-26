@@ -3,7 +3,7 @@ name = "tauri-plugin-barrel-kit"
 version = "0.0.1"
 edition = "2021"
 description = "Barrel's release-intelligence SDK for Tauri apps."
-license = "MIT"
+license = "Apache-2.0"
 repository = "https://github.com/barrelsystems/sdk-tauri"
 # The test service is never shipped (see the `test-service` feature below) --
 # excluded here too, so its source isn't dead weight in every consumer's
